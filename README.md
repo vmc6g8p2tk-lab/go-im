@@ -1,6 +1,6 @@
 # Go 即时通信系统 · V1.0 迭代中
 
-本项目按阶段构建可解释、可验证的即时通信系统。已实现注册、登录、JWT、单实例 WebSocket 单聊、PostgreSQL 落库、历史查询、客户端消息 ID 幂等、送达 ACK、未确认消息重试及离线补发。Redis 在线实例路由已接入，可选关闭；Kafka 和跨实例投递仍在后续阶段。**尚无并发性能结论。** [架构设计](ARCHITECTURE.md)解释目标与后续边界，[学习记录](LEARNING.md)解释关键实现及面试问答。
+本项目按阶段构建可解释、可验证的即时通信系统。已实现注册、登录、JWT、WebSocket 单聊、PostgreSQL 落库、历史查询、客户端消息 ID 幂等、送达 ACK、未确认消息重试及离线补发。Redis 在线实例路由与 Kafka outbox 跨实例事件代码已接入；真实 Kafka Broker 和容器环境尚未验证。双进程数据库补发路径已实测。**尚无并发性能结论。** [架构设计](ARCHITECTURE.md)解释目标与后续边界，[学习记录](LEARNING.md)解释关键实现及面试问答。
 
 ## 环境与启动
 
@@ -43,7 +43,7 @@ go test -v ./tests
 docker compose --env-file .env -f deployments/compose.yaml exec postgres psql -U im -d im -c 'SELECT id, sender_id, recipient_id, body, created_at FROM messages ORDER BY id DESC LIMIT 10;'
 ```
 
-`tests/e2e_test.go` 使用真实 HTTP、两个 WebSocket 连接和 PostgreSQL，验证双向消息、落库及历史查询。未设置两个测试环境变量时它会明确跳过，不可将跳过写成通过。实际执行记录见 [TEST_RESULTS.md](TEST_RESULTS.md)。
+`tests/e2e_test.go` 使用真实 HTTP、两个 WebSocket 连接和 PostgreSQL，验证双向消息、落库及历史查询。`INTEGRATION_SERVER_BINARY` 与 `INTEGRATION_JWT_SECRET` 还可启用双进程故障恢复测试。未设置所需环境变量时测试会明确跳过，不可将跳过写成通过。实际执行记录见 [TEST_RESULTS.md](TEST_RESULTS.md)。
 
 ## 目录
 
@@ -54,7 +54,9 @@ internal/config        环境配置
 internal/handler       HTTP 接口
 internal/middleware    Bearer 鉴权
 internal/migration     迁移执行器
+internal/messaging     Kafka outbox 发布与消费
 internal/model         数据结构
+internal/presence      Redis 在线实例路由
 internal/repository    PostgreSQL SQL
 internal/service       业务规则
 internal/websocket     Hub、连接读写循环
@@ -66,10 +68,10 @@ tests                  真实服务端到端测试
 
 ## 已知边界
 
-- Hub 仍只管理本实例连接；Redis 保存带 TTL 的实例路由，但跨实例实时投递尚未实现。未确认消息在 PostgreSQL 中保留并可重连补发。
+- Hub 只管理本实例连接；Kafka 每实例独立消费组传播消息事件。PostgreSQL 中的未确认消息可由在线重试循环和重连同步补发。双进程数据库补发路径已测试；真实 Kafka 与真实 Redis 跨实例路径仍未验证。
 - 已实现送达 ACK 和重试，但客户端仍需去重；旧客户端不传 ID 时重发仍可能重复写库。已读 ACK 尚未实现。
 - JWT 在到期前不可主动吊销；生产环境需要 TLS/WSS、密钥管理与限流。
 - `go.mod` 暂用 `github.com/example/go-im`，发布到你的 GitHub 仓库前应替换为实际仓库路径并更新 Go import。
 - 历史查询分页按数据库消息 ID，而非全局严格时间顺序。
 
-Kafka、群聊和监控仍在后续阶段。当前 Redis 路由用 `REDIS_ADDR` 启用；未设置时核心单实例链路照常运行。真实 Redis 与 Compose 启动尚未在本机验证。
+Kafka/outbox 代码可用 `KAFKA_BROKERS` 启用；未设置时沿用单实例即时投递。`docker compose --profile multi --env-file .env -f deployments/compose.yaml up --build -d` 配置第二个服务实例（8081）；本机没有 Docker，Compose 及真实 Broker **未验证**。每实例独立消费组使 Kafka 读取成本随实例数增加。群聊、监控、正式压测仍未实现。真实 Redis 与 Compose 启动尚未在本机验证。

@@ -32,6 +32,7 @@ type Server struct {
 	AllowedOrigins map[string]struct{}
 	Presence       *presence.RedisStore
 	InstanceID     string
+	AsyncDelivery  bool
 }
 
 type client struct {
@@ -183,10 +184,32 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Preserve the phase-one sender echo for legacy clients.
 			s.Hub.deliver(c.userID, payload)
 		}
-		if created && message.RecipientID != c.userID {
+		if created && message.RecipientID != c.userID && !s.AsyncDelivery {
 			s.Hub.deliver(message.RecipientID, payload)
 		}
 	}
+}
+
+// HandleOutboxEvent resolves the durable row again; Kafka only carries its ID.
+// Replays have no database side effect. Clients deduplicate repeated frames by
+// message.id, since a crash can replay a published event.
+func (s *Server) HandleOutboxEvent(ctx context.Context, event repository.OutboxEvent) error {
+	message, err := s.Service.Store.MessageByID(ctx, event.MessageID)
+	if err != nil {
+		return err
+	}
+	if message.RecipientID != event.RecipientID {
+		return errors.New("Kafka recipient does not match message")
+	}
+	if len(s.Hub.UserIDs()) == 0 {
+		return nil
+	}
+	payload, err := messagePayload(message)
+	if err != nil {
+		return err
+	}
+	s.Hub.deliver(message.RecipientID, payload)
+	return nil
 }
 
 func writeBeforeStart(conn *ws.Conn, code, message string) {

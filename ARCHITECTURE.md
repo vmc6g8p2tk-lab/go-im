@@ -15,7 +15,7 @@ WebSocket 客户端 ── 认证/单聊 ──────┘    │
 
 单实例 Go 服务承担 HTTP、JWT 验证、WebSocket 连接管理和消息写入。只有数据库写入成功后才向在线连接推送消息；同一用户可有多个连接。此阶段的在线推送只覆盖本实例，离线用户通过历史 API 获取持久化消息。
 
-## 3. 后续完整架构（目标，尚未实现）
+## 3. V1.0 目标架构（部分已实现）
 
 ```text
 客户端 → 负载均衡 → 多个 Go 网关/业务实例 → PostgreSQL
@@ -25,7 +25,7 @@ WebSocket 客户端 ── 认证/单聊 ──────┘    │
 Prometheus ← 指标端点；Grafana ← Prometheus
 ```
 
-后续要先定义投递语义、幂等键、ACK 与重试状态，再引入 Kafka。不能仅靠加入队列宣称“可靠消息”或“高并发”。
+幂等键、ACK、数据库重试与 Kafka outbox 已进入代码。群聊、限流、指标和正式压测仍未完成。真实 Kafka 容器还未运行，不能仅凭代码和模拟测试宣称跨实例 Broker 链路已验证。
 
 ## 4. 组件职责与目录
 
@@ -41,21 +41,22 @@ Prometheus ← 指标端点；Grafana ← Prometheus
 | `internal/websocket` | 连接认证、读写循环、进程内 Hub |
 | `internal/auth` | 密码散列与 JWT 签发/验证 |
 | `internal/presence` | Redis 在线实例路由与过期过滤（可选） |
+| `internal/messaging` | Kafka outbox 发布与每实例消费组 |
 | `migrations` | 纳入 Git 的有序 SQL 迁移 |
 | `deployments` | Docker Compose 与容器镜像 |
 | `tests` | 从外部调用真实服务的集成验证 |
 
-Redis 在线路由已作为可选组件接入；Kafka 与监控仍未接入。消息的唯一真相仍在 PostgreSQL。
+Redis 在线路由和 Kafka 发布/消费代码可选接入；监控仍未接入。消息的唯一真相仍在 PostgreSQL。
 
 ## 5. 数据流
 
 1. 注册：规范化用户名 → 校验输入 → bcrypt 散列密码 → 参数化 SQL 插入用户。
 2. 登录：按用户名读取散列 → bcrypt 验证 → 签发限时 HS256 JWT。
 3. 建连：客户端连接 `/v1/ws`，在限定时间内发送 `auth` 帧；服务端验证 JWT 后把连接加入 Hub。
-4. 发消息：服务端校验目标用户和正文 → 写入 PostgreSQL → 生成包含数据库 ID 的 `message.new` → 投递至发送者及目标用户在本实例的在线连接。
+4. 发消息：服务端校验目标用户和正文 → PostgreSQL 同事务写消息与 outbox → 发送者收到 `server_ack` → 发布者把事件发给 Kafka → 每实例消费者仅投递本地连接；Kafka 未配置时保留单实例直接投递。
 5. 查历史：Bearer JWT 认证 → 按双方用户 ID、消息 ID 游标查询 → 返回按时间正序的记录。
 
-成功写库与实时投递之间仍有故障窗口。第一阶段不保证实时帧必达，历史记录是当前阶段的恢复入口。
+成功写库后若 Kafka 不可用，outbox 和未确认消息保留在数据库；在线重试与重连同步提供恢复入口。实时帧仍是至少一次语义。
 
 ## 6. PostgreSQL 表设计
 
@@ -85,7 +86,7 @@ Redis 在线路由已作为可选组件接入；Kafka 与监控仍未接入。�
 
 双向历史查询使用 `(sender_id, recipient_id, id DESC)` 索引；当前 SQL 合并两个方向并按 `id DESC` 截取，再正序返回。生产规模需要依据 `EXPLAIN ANALYZE` 和真实数据分布评估会话键、分区等方案。`id` 的顺序是数据库分配顺序，不承诺严格的客户端发送时间顺序。
 
-## 7. Redis Key 设计（在线路由已接入；跨实例消费尚未实现）
+## 7. Redis Key 设计
 
 | Key | 类型 | 值/用途 | TTL |
 | --- | --- | --- | --- |
@@ -125,6 +126,14 @@ Redis 在线路由已作为可选组件接入；Kafka 与监控仍未接入。�
 
 当前单服务器重试循环按在线用户串行查询，规模化前需用真实压测评估数据库扫描成本；多实例下还要验证跨实例领取与投递路由。没有客户端 ACK 的旧用户会持续保留 `created`，这是兼容期的明确限制。
 
+### Kafka 异步投递与事务 outbox（已实现代码，真实 Broker 未验证）
+
+新消息插入时，PostgreSQL 触发器在同一事务写入 `message_outbox(message_id, recipient_id, created_at, published_at)`；回滚时两行一起回滚。每个实例的发布循环通过 `FOR UPDATE SKIP LOCKED` 领取未发布事件，Kafka 同步写入确认后才设置 `published_at` 并提交。失败则回滚，事件留待重试。进程若在 Kafka 确认后、数据库提交前崩溃，事件可能重复发布。Kafka 不提供整个 PostgreSQL + WebSocket 业务的 exactly once。
+
+Topic `im.message.created.v1` 使用接收者 ID 作为 Partition Key。同一分区内部保留 Kafka 写入顺序；多发布者并发领取、数据库提交时序、客户端重连补发都会使端到端严格会话顺序不能保证。客户端按服务端消息 ID 排序展示和去重。每个实例有独立 Consumer Group `im-delivery-{instance_id}`，收到事件后再次从 PostgreSQL 读取消息，仅投递本地连接，处理成功后提交 offset。这样每个实例都能看到事件，但 Kafka 读取和数据库查询成本随实例数线性增长；大规模方案应考虑按路由转发或专用网关，且需要失效路由的恢复路径。
+
+配置 `KAFKA_BROKERS` 后，新消息不再直接投递本地接收连接，而是由 Kafka 消费链路投递；发送方的 `server_ack` 仍在数据库写入后立刻返回。Kafka 不可用时消息与 outbox 留在 PostgreSQL；在线接收者可被现有数据库重试循环补发，离线接收者下次连接同步。Kafka 消费重放可能生成重复 WebSocket 帧，但不能新建第二条逻辑消息；接收方应按 `message.id` 去重、重复 ACK。跨实例 ACK 的 `message.status` 目前只通知 ACK 所在实例的发送方连接，其他实例的发送方需查历史状态，此缺口待修复。
+
 ## 9. HTTP API 设计
 
 统一使用 `application/json`；错误格式为 `{"error":{"code":"...","message":"..."}}`。
@@ -143,14 +152,14 @@ Redis 在线路由已作为可选组件接入；Kafka 与监控仍未接入。�
 - 环境变量提供连接串、JWT 密钥、监听地址和允许的 WebSocket Origin。密钥不进入仓库；`.env.example` 仅给占位符。
 - 使用 SQL 迁移文件和独立迁移命令。数据库约束与服务层校验同时存在。
 - bcrypt 是方便验证的安全起点，但计算成本会影响登录吞吐；未来根据压测及安全要求评估 Argon2id。
-- 单实例 Hub 不跨实例同步。第一阶段的“在线”仅表示当前进程内连接。
+- Hub 只管理本实例连接；Kafka 每实例独立消费组负责跨实例事件传播，数据库补发为恢复路径。真实 Kafka 与进程级跨实例链路尚未验证。
 - Redis 在线路由可通过 `REDIS_ADDR` 启用；Compose 现包含 Redis，但尚未在本机实际验证容器启动。
 
 ## 11. 后续扩展方案
 
 1. 客户端消息 ID、ACK、重试和离线同步已经实现；继续补充会话 ID、跨实例投递及更完整的已读语义。
 2. Redis 在线路由已实现；继续做真实 Redis 故障验证与限流。
-3. 引入 Kafka 及 outbox/事务边界设计，明确数据库提交与事件发布的一致性。
+3. Kafka/outbox 代码已实现；在真实 Broker 上验证消费组、重复事件、重启、故障与顺序，再考虑定向分发以降低 O(实例数) 成本。
 4. 扩展群聊、成员权限和扇出策略；用真实数据测试热点群场景。
 5. 先建立可复现的压测环境和原始数据，再添加 Prometheus/Grafana，记录吞吐、P95/P99、CPU、内存、错误率及测试配置。
 6. 多实例部署和故障演练，验证断线恢复、重复投递、消息顺序与资源上限。

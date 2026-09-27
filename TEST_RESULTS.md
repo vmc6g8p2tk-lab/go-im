@@ -78,3 +78,13 @@ ok  github.com/example/go-im/tests  1.097s
 加入 Redis 后再次运行带真实 PostgreSQL 端到端环境的 `go test -count=1 ./...`、`go vet ./...` 和 `go mod verify`，均通过。Compose YAML 可解析为 4 个服务；这只验证语法，不代表 Docker Compose 已启动。
 
 **真实 Redis Server 未验证**：当前 Windows 环境没有 Docker/Redis 服务。Compose 已加入 Redis 服务，但没有声称它已实际启动或验证跨实例路由。
+
+## V1.0 迭代：Kafka outbox 与双实例恢复路径（2026-09-27）
+
+对真实 PostgreSQL 18.3 执行迁移 `011`–`014`，SQL 触发器将消息与 outbox 行在同一事务保存。`TestOutboxAtomicPublishAndRetry` 用可注入的发布函数模拟 Broker 错误：错误返回后 `published_at` 保持空值，下一次成功发布后该字段落库；测试通过。此测试验证数据库事务边界，**不是实际 Kafka 发布**。
+
+`TestCrossInstanceConsumerDelivery` 在同一测试进程内启动两个独立 HTTP/WebSocket 服务器与 Hub，共用真实 PostgreSQL 和 `miniredis`；将事件注入 Kafka 消费处理边界后，另一实例连接收到相同数据库消息 ID。重复注入会重复产生帧，但数据库仍只有一条逻辑消息并保持已确认状态；测试通过。**不是实际 Broker 或独立进程的消费测试**。
+
+`TestTwoProcessesDatabaseFallbackAndReconnect` 启动两个真实服务操作系统进程，分别连接真实 PostgreSQL 与 `miniredis`。A 连进程 1，B 连进程 2；A 发消息后，B 由数据库重试循环收到并 ACK。随后强制结束进程 2，A 再发消息，B 重连进程 1 并同步同一条未确认消息；Redis 模拟器中的 B 路由出现进程 1，PostgreSQL 核查两条消息记录。测试通过。首次使用 5 秒读取超时失败：新消息的 `next_delivery_at` 初值是写入后 5 秒，轮询可能再等约 2 秒；改用 10 秒观察窗口后通过。这个测试**未启用 Kafka**，只验证数据库补发跨进程恢复路径。进程 2 的旧 Redis 路由需靠 30 秒心跳过期过滤，测试未等待该窗口。
+
+新二进制运行在本地 `127.0.0.1:18080`、未设置 Redis/Kafka 的兼容模式下，`go test -count=1 ./...`、`go vet ./...`、`go mod verify` 均通过；此前第一阶段端到端测试仍通过。Compose YAML 静态解析识别 7 个服务，但本机无 Docker，因此 **真实 Kafka、真实 Redis、Compose 启动和 Kafka 多实例链路均未验证**。没有生成或宣称任何吞吐、延迟、CPU、内存数据。

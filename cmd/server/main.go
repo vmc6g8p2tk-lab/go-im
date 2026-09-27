@@ -15,6 +15,7 @@ import (
 	"github.com/example/go-im/internal/auth"
 	"github.com/example/go-im/internal/config"
 	"github.com/example/go-im/internal/handler"
+	"github.com/example/go-im/internal/messaging"
 	"github.com/example/go-im/internal/middleware"
 	"github.com/example/go-im/internal/migration"
 	"github.com/example/go-im/internal/presence"
@@ -75,7 +76,21 @@ func run() error {
 	api := &handler.API{Service: svc, DB: pool}
 	hub := websocket.NewHub()
 	wsServer := &websocket.Server{Auth: manager, Service: svc, Hub: hub, AllowedOrigins: config.AllowedOrigins, Presence: presenceStore, InstanceID: instanceID}
+	var broker *messaging.Kafka
+	if config.KafkaBrokers != "" {
+		broker = messaging.New(config.KafkaBrokers, instanceID)
+		wsServer.AsyncDelivery = true
+	}
 	retryCtx, retryCancel := context.WithCancel(ctx)
+	kafkaPublisherDone := make(chan struct{})
+	kafkaConsumerDone := make(chan struct{})
+	if broker != nil {
+		go func() { defer close(kafkaPublisherDone); messaging.RunPublisher(retryCtx, store, broker.Publish) }()
+		go func() { defer close(kafkaConsumerDone); broker.RunConsumer(retryCtx, wsServer.HandleOutboxEvent) }()
+	} else {
+		close(kafkaPublisherDone)
+		close(kafkaConsumerDone)
+	}
 	retryDone := make(chan struct{})
 	go func() {
 		defer close(retryDone)
@@ -112,6 +127,11 @@ func run() error {
 	retryCancel()
 	<-retryDone
 	<-presenceDone
+	<-kafkaPublisherDone
+	<-kafkaConsumerDone
+	if broker != nil {
+		broker.Close()
+	}
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	wsServer.RemoveLocalRoutes(cleanupCtx)
 	cleanupCancel()

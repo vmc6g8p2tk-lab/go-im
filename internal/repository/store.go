@@ -18,6 +18,55 @@ var ErrIdempotencyConflict = errors.New("client_message_id already used with dif
 
 type Store struct{ DB *pgxpool.Pool }
 
+// OutboxEvent is created by the database trigger in the same transaction as
+// its message. It is a durable notification, never the message source of truth.
+type OutboxEvent struct {
+	MessageID   int64 `json:"message_id"`
+	RecipientID int64 `json:"recipient_id"`
+}
+
+// PublishNext keeps the row locked until Kafka confirms the write. A crash
+// after Kafka accepts it but before commit may publish it twice; consumers
+// must therefore be idempotent by message ID.
+func (s *Store) PublishNext(ctx context.Context, publish func(context.Context, OutboxEvent) error) (bool, error) {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	var event OutboxEvent
+	err = tx.QueryRow(ctx, `SELECT message_id, recipient_id FROM message_outbox
+		WHERE published_at IS NULL ORDER BY created_at, message_id
+		LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&event.MessageID, &event.RecipientID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := publish(ctx, event); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE message_outbox SET published_at = now() WHERE message_id = $1`, event.MessageID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) MessageByID(ctx context.Context, id int64) (model.Message, error) {
+	var message model.Message
+	err := s.DB.QueryRow(ctx, `SELECT id, client_message_id, sender_id, recipient_id, body, created_at, delivery_status, delivered_at
+		FROM messages WHERE id = $1`, id).Scan(&message.ID, &message.ClientMessageID, &message.SenderID,
+		&message.RecipientID, &message.Body, &message.CreatedAt, &message.DeliveryStatus, &message.DeliveredAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.Message{}, ErrNotFound
+	}
+	return message, err
+}
+
 func (s *Store) CreateUser(ctx context.Context, username, passwordHash string) (model.User, error) {
 	var user model.User
 	err := s.DB.QueryRow(ctx, `INSERT INTO users (username, password_hash) VALUES ($1, $2)

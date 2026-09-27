@@ -13,6 +13,7 @@ type Config struct {
 	AllowedOrigins map[string]struct{}
 	RedisAddr      string
 	RedisPassword  string
+	KafkaBrokers   string
 }
 
 func Load() (Config, error) {
@@ -23,6 +24,7 @@ func Load() (Config, error) {
 		AllowedOrigins: make(map[string]struct{}),
 		RedisAddr:      os.Getenv("REDIS_ADDR"),
 		RedisPassword:  os.Getenv("REDIS_PASSWORD"),
+		KafkaBrokers:   os.Getenv("KAFKA_BROKERS"),
 	}
 	if c.DatabaseURL == "" {
 		return Config{}, errors.New("DATABASE_URL is required")
