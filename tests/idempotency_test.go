@@ -69,6 +69,16 @@ func TestMessageIdempotency(t *testing.T) {
 	if err := ac.ReadJSON(&conflict); err != nil || conflict.Type != "error" || conflict.Code != "idempotency_conflict" {
 		t.Fatalf("expected idempotency conflict, got %+v err=%v", conflict, err)
 	}
+	if err := bc.WriteJSON(map[string]any{"type": "delivery.ack", "message_id": originalID}); err != nil {
+		t.Fatal(err)
+	}
+	var ack struct {
+		Type string `json:"type"`
+	}
+	_ = bc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if err := bc.ReadJSON(&ack); err != nil || ack.Type != "delivery.ack.ok" {
+		t.Fatalf("delivery ack: %+v err=%v", ack, err)
+	}
 	_ = bc.Close()
 
 	// Eight connections of the same user race to create one logical message.
@@ -135,18 +145,26 @@ func newClientMessageID(t *testing.T) string {
 }
 
 func readMessageID(conn *websocket.Conn) (int64, error) {
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	return readMessageIDWithin(conn, 5*time.Second)
+}
+
+func readMessageIDWithin(conn *websocket.Conn, timeout time.Duration) (int64, error) {
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
 	var frame struct {
-		Type    string `json:"type"`
-		Message struct {
+		Type      string `json:"type"`
+		MessageID int64  `json:"message_id"`
+		Message   struct {
 			ID int64 `json:"id"`
 		} `json:"message"`
 	}
 	if err := conn.ReadJSON(&frame); err != nil {
 		return 0, err
 	}
-	if frame.Type != "message.new" || frame.Message.ID <= 0 {
-		return 0, fmt.Errorf("expected message.new, got %+v", frame)
+	if frame.Type == "server_ack" && frame.MessageID > 0 {
+		return frame.MessageID, nil
 	}
-	return frame.Message.ID, nil
+	if frame.Type == "message.new" && frame.Message.ID > 0 {
+		return frame.Message.ID, nil
+	}
+	return 0, fmt.Errorf("expected server_ack or message.new, got %+v", frame)
 }

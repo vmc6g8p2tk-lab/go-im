@@ -1,6 +1,6 @@
 # Go 即时通信系统 · V1.0 迭代中
 
-本项目按阶段构建可解释、可验证的即时通信系统。已实现注册、登录、JWT、单实例 WebSocket 单聊、PostgreSQL 落库、历史查询和客户端消息 ID 幂等。ACK、离线同步、多实例及中间件仍在后续阶段。**尚无并发性能结论。** [架构设计](ARCHITECTURE.md)解释目标与后续边界，[学习记录](LEARNING.md)解释关键实现及面试问答。
+本项目按阶段构建可解释、可验证的即时通信系统。已实现注册、登录、JWT、单实例 WebSocket 单聊、PostgreSQL 落库、历史查询、客户端消息 ID 幂等、送达 ACK、未确认消息重试及离线补发。多实例及中间件仍在后续阶段。**尚无并发性能结论。** [架构设计](ARCHITECTURE.md)解释目标与后续边界，[学习记录](LEARNING.md)解释关键实现及面试问答。
 
 ## 环境与启动
 
@@ -29,7 +29,9 @@ $login = Invoke-RestMethod -Method Post http://localhost:8080/v1/auth/login -Con
 Invoke-RestMethod -Headers @{Authorization="Bearer $($login.token)"} "http://localhost:8080/v1/messages?peer_id=$($bob.user.id)"
 ```
 
-WebSocket 地址是 `ws://localhost:8080/v1/ws`。升级后首帧发送 `{"type":"auth","token":"登录返回的 JWT"}`，收到 `auth.ok` 才发送 `{"type":"message.send","recipient_id":2,"client_message_id":"0c0dcce8-7a12-4f9d-8827-0527722092b1","body":"你好"}`。客户端对同一条逻辑消息的重试必须复用相同 UUID。两个用户都保持连接时，双方会收到同一 `message.new`，其中的 `message.id` 是已落库的 ID。完整协议和错误格式见 [ARCHITECTURE.md](ARCHITECTURE.md)。本地可用 `wscat` 或下面的端到端测试自动连接两个用户。
+WebSocket 地址是 `ws://localhost:8080/v1/ws`。升级后首帧发送 `{"type":"auth","token":"登录返回的 JWT"}`，收到 `auth.ok` 才发送 `{"type":"message.send","recipient_id":2,"client_message_id":"0c0dcce8-7a12-4f9d-8827-0527722092b1","body":"你好"}`。客户端对同一条逻辑消息的重试必须复用相同 UUID。完整协议和错误格式见 [ARCHITECTURE.md](ARCHITECTURE.md)。本地可用 `wscat` 或下面的端到端测试自动连接两个用户。
+
+传入 `client_message_id` 的发送者收到 `server_ack`，它只表示消息已落库；接收者收到 `message.new` 后发送 `{"type":"delivery.ack","message_id":7}`，数据库状态才进入 `delivered`。旧客户端不传 ID 时保留第一阶段的发送者 `message.new` 回显。离线或 ACK 丢失会使同一消息帧重现，客户端需按服务器消息 ID 去重。重试批量与边界见架构文档。
 
 ## 测试与数据库核查
 
@@ -64,8 +66,8 @@ tests                  真实服务端到端测试
 
 ## 已知边界
 
-- 单实例 Hub 只能推送本进程内在线用户；离线用户要查询历史。
-- 发送记录已有客户端 ID 幂等；实时帧尚无 delivery ACK、自动重试或去重，旧客户端不传 ID 时仍可能重复写库。
+- Hub 仍只管理本实例连接；未确认消息在 PostgreSQL 中保留并可重连补发，跨实例实时路由尚未实现。
+- 已实现送达 ACK 和重试，但客户端仍需去重；旧客户端不传 ID 时重发仍可能重复写库。已读 ACK 尚未实现。
 - JWT 在到期前不可主动吊销；生产环境需要 TLS/WSS、密钥管理与限流。
 - `go.mod` 暂用 `github.com/example/go-im`，发布到你的 GitHub 仓库前应替换为实际仓库路径并更新 Go import。
 - 历史查询分页按数据库消息 ID，而非全局严格时间顺序。

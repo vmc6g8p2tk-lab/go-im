@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/example/go-im/internal/model"
 	"github.com/jackc/pgx/v5"
@@ -50,14 +51,14 @@ func (s *Store) SaveMessage(ctx context.Context, senderID, recipientID int64, bo
 		// Existing phase-one clients omit the ID. PostgreSQL assigns a fresh one;
 		// only clients that resend their own stable ID get idempotent behavior.
 		err := s.DB.QueryRow(ctx, `INSERT INTO messages (sender_id, recipient_id, body) VALUES ($1, $2, $3)
-			RETURNING id, client_message_id, sender_id, recipient_id, body, created_at`, senderID, recipientID, body).
-			Scan(&message.ID, &message.ClientMessageID, &message.SenderID, &message.RecipientID, &message.Body, &message.CreatedAt)
+			RETURNING id, client_message_id, sender_id, recipient_id, body, created_at, delivery_status, delivered_at`, senderID, recipientID, body).
+			Scan(&message.ID, &message.ClientMessageID, &message.SenderID, &message.RecipientID, &message.Body, &message.CreatedAt, &message.DeliveryStatus, &message.DeliveredAt)
 		return message, true, err
 	}
 	err := s.DB.QueryRow(ctx, `INSERT INTO messages (sender_id, recipient_id, body, client_message_id)
 		VALUES ($1, $2, $3, $4::uuid) ON CONFLICT (sender_id, client_message_id) DO NOTHING
-		RETURNING id, client_message_id, sender_id, recipient_id, body, created_at`, senderID, recipientID, body, clientMessageID).
-		Scan(&message.ID, &message.ClientMessageID, &message.SenderID, &message.RecipientID, &message.Body, &message.CreatedAt)
+		RETURNING id, client_message_id, sender_id, recipient_id, body, created_at, delivery_status, delivered_at`, senderID, recipientID, body, clientMessageID).
+		Scan(&message.ID, &message.ClientMessageID, &message.SenderID, &message.RecipientID, &message.Body, &message.CreatedAt, &message.DeliveryStatus, &message.DeliveredAt)
 	if err == nil {
 		return message, true, nil
 	}
@@ -66,9 +67,9 @@ func (s *Store) SaveMessage(ctx context.Context, senderID, recipientID int64, bo
 	}
 	// The unique index serializes concurrent inserts. This separate statement
 	// sees the winner under PostgreSQL's default READ COMMITTED isolation.
-	err = s.DB.QueryRow(ctx, `SELECT id, client_message_id, sender_id, recipient_id, body, created_at
+	err = s.DB.QueryRow(ctx, `SELECT id, client_message_id, sender_id, recipient_id, body, created_at, delivery_status, delivered_at
 		FROM messages WHERE sender_id = $1 AND client_message_id = $2::uuid`, senderID, clientMessageID).
-		Scan(&message.ID, &message.ClientMessageID, &message.SenderID, &message.RecipientID, &message.Body, &message.CreatedAt)
+		Scan(&message.ID, &message.ClientMessageID, &message.SenderID, &message.RecipientID, &message.Body, &message.CreatedAt, &message.DeliveryStatus, &message.DeliveredAt)
 	if err != nil {
 		return model.Message{}, false, err
 	}
@@ -83,7 +84,7 @@ func (s *Store) History(ctx context.Context, userID, peerID, beforeID int64, lim
 	if beforeID > 0 {
 		cursor = beforeID
 	}
-	rows, err := s.DB.Query(ctx, `SELECT id, client_message_id, sender_id, recipient_id, body, created_at FROM messages
+	rows, err := s.DB.Query(ctx, `SELECT id, client_message_id, sender_id, recipient_id, body, created_at, delivery_status, delivered_at FROM messages
 		WHERE ((sender_id = $1 AND recipient_id = $2) OR (sender_id = $2 AND recipient_id = $1))
 		AND ($3::bigint IS NULL OR id < $3)
 		ORDER BY id DESC LIMIT $4`, userID, peerID, cursor, limit)
@@ -94,7 +95,7 @@ func (s *Store) History(ctx context.Context, userID, peerID, beforeID int64, lim
 	messages := make([]model.Message, 0, limit)
 	for rows.Next() {
 		var m model.Message
-		if err := rows.Scan(&m.ID, &m.ClientMessageID, &m.SenderID, &m.RecipientID, &m.Body, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ClientMessageID, &m.SenderID, &m.RecipientID, &m.Body, &m.CreatedAt, &m.DeliveryStatus, &m.DeliveredAt); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
 		messages = append(messages, m)
@@ -106,6 +107,58 @@ func (s *Store) History(ctx context.Context, userID, peerID, beforeID int64, lim
 	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
 		messages[i], messages[j] = messages[j], messages[i]
 	}
+	return messages, nil
+}
+
+// AcknowledgeDelivery only trusts the authenticated recipient, never a sender_id
+// carried in a frame. Repeated ACKs return the same row without changing time.
+func (s *Store) AcknowledgeDelivery(ctx context.Context, recipientID, messageID int64) (model.Message, bool, error) {
+	var message model.Message
+	err := s.DB.QueryRow(ctx, `UPDATE messages SET delivery_status = 'delivered', delivered_at = now()
+		WHERE id = $1 AND recipient_id = $2 AND delivery_status = 'created'
+		RETURNING id, client_message_id, sender_id, recipient_id, body, created_at, delivery_status, delivered_at`, messageID, recipientID).
+		Scan(&message.ID, &message.ClientMessageID, &message.SenderID, &message.RecipientID, &message.Body, &message.CreatedAt, &message.DeliveryStatus, &message.DeliveredAt)
+	if err == nil {
+		return message, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return model.Message{}, false, err
+	}
+	err = s.DB.QueryRow(ctx, `SELECT id, client_message_id, sender_id, recipient_id, body, created_at, delivery_status, delivered_at
+		FROM messages WHERE id = $1 AND recipient_id = $2`, messageID, recipientID).
+		Scan(&message.ID, &message.ClientMessageID, &message.SenderID, &message.RecipientID, &message.Body, &message.CreatedAt, &message.DeliveryStatus, &message.DeliveredAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.Message{}, false, ErrNotFound
+	}
+	return message, false, err
+}
+
+// ClaimPending advances the retry clock atomically, so concurrent sockets or
+// instances do not all select the same due messages in one retry interval.
+func (s *Store) ClaimPending(ctx context.Context, recipientID int64, force bool, limit int) ([]model.Message, error) {
+	rows, err := s.DB.Query(ctx, `WITH due AS (
+		SELECT id FROM messages WHERE recipient_id = $1 AND delivery_status = 'created'
+		AND ($2::boolean OR next_delivery_at <= now()) ORDER BY id LIMIT $3 FOR UPDATE SKIP LOCKED
+	) UPDATE messages AS m SET delivery_attempts = m.delivery_attempts + 1,
+		next_delivery_at = now() + interval '5 seconds' FROM due WHERE m.id = due.id
+	RETURNING m.id, m.client_message_id, m.sender_id, m.recipient_id, m.body,
+		m.created_at, m.delivery_status, m.delivered_at`, recipientID, force, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	messages := make([]model.Message, 0, limit)
+	for rows.Next() {
+		var m model.Message
+		if err := rows.Scan(&m.ID, &m.ClientMessageID, &m.SenderID, &m.RecipientID, &m.Body, &m.CreatedAt, &m.DeliveryStatus, &m.DeliveredAt); err != nil {
+			return nil, err
+		}
+		messages = append(messages, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(messages, func(i, j int) bool { return messages[i].ID < messages[j].ID })
 	return messages, nil
 }
 

@@ -77,3 +77,17 @@ func (s *Service) History(ctx context.Context, userID, peerID, beforeID int64, l
 	}
 	return s.Store.History(ctx, userID, peerID, beforeID, limit)
 }
+
+func (s *Service) AcknowledgeDelivery(ctx context.Context, recipientID, messageID int64) (model.Message, bool, error) {
+	if recipientID <= 0 || messageID <= 0 {
+		return model.Message{}, false, ErrInvalidInput
+	}
+	return s.Store.AcknowledgeDelivery(ctx, recipientID, messageID)
+}
+
+func (s *Service) ClaimPending(ctx context.Context, recipientID int64, force bool, limit int) ([]model.Message, error) {
+	if recipientID <= 0 || limit < 1 || limit > 100 {
+		return nil, ErrInvalidInput
+	}
+	return s.Store.ClaimPending(ctx, recipientID, force, limit)
+}

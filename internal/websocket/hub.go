@@ -49,3 +49,13 @@ func (h *Hub) CloseAll() {
 		}
 	}
 }
+
+func (h *Hub) UserIDs() []int64 {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	ids := make([]int64, 0, len(h.clients))
+	for id := range h.clients {
+		ids = append(ids, id)
+	}
+	return ids
+}

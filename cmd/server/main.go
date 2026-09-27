@@ -54,6 +54,12 @@ func run() error {
 	api := &handler.API{Service: svc, DB: pool}
 	hub := websocket.NewHub()
 	wsServer := &websocket.Server{Auth: manager, Service: svc, Hub: hub, AllowedOrigins: config.AllowedOrigins}
+	retryCtx, retryCancel := context.WithCancel(ctx)
+	retryDone := make(chan struct{})
+	go func() {
+		defer close(retryDone)
+		wsServer.RunRetryLoop(retryCtx)
+	}()
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/auth/register", api.Register)
 	mux.HandleFunc("POST /v1/auth/login", api.Login)
@@ -77,6 +83,8 @@ func run() error {
 			listenErr = err
 		}
 	}
+	retryCancel()
+	<-retryDone
 	// Upgraded sockets are outside http.Server.Shutdown; close them explicitly.
 	hub.CloseAll()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)

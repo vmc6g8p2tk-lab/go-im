@@ -59,3 +59,14 @@ ok  github.com/example/go-im/tests  1.097s
 - 单独启动测试服务、发送、强制终止进程、重启并重发：返回原服务器消息 ID，数据库仍仅 1 行；`TestIdempotencySurvivesServerRestart` 通过。
 
 这些检查证明数据库逻辑记录的幂等行为；**尚未**证明消息帧可靠送达。旧协议不传客户端 ID 时保留原行为，仍不具备重发幂等性。
+
+## V1.0 迭代：ACK、重试与离线补发（2026-09-27）
+
+在同一真实 PostgreSQL 18.3 数据库执行迁移 `006`–`010`，启动新服务后执行真实 WebSocket 测试：
+
+- `TestDeliveryAcknowledgmentAndDuplicateACK`：`server_ack` 后数据库仍为 `created`；发送者伪造接收 ACK 被拒；接收者 ACK 后状态与首次确认时间持久化；重复 ACK 不改时间。
+- `TestOfflineReconnectAndLostACK`：接收者离线时消息保留；首次连接未 ACK 即断开，再连接收到同一消息 ID；确认后数据库只有一条且状态为 `delivered`。
+- `TestDelayedACKCausesRetry`：故意延迟 ACK，约 5 秒后观察到同一消息 ID 再投递；数据库 `delivery_attempts >= 1`。
+- `TestOfflineSyncAcrossBatches`：发送 120 条离线消息，接收者跨多个 32 条批次收齐并逐条 ACK；数据库确认 120 条均为 `delivered`。首版 100 条重试批量曾使 64 帧队列满并断开连接；将单批降至 32 条后测试通过。这是实际发现并修复的背压问题，不是性能基准。
+
+上述证明单实例的数据库状态与重试行为；多实例、Redis/Kafka 故障和正式压测仍未验证。帧允许重复，客户端必须按 `message.id` 去重。

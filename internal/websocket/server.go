@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/example/go-im/internal/auth"
+	"github.com/example/go-im/internal/model"
 	"github.com/example/go-im/internal/repository"
 	"github.com/example/go-im/internal/service"
 	ws "github.com/gorilla/websocket"
@@ -51,6 +52,7 @@ type incoming struct {
 	RecipientID     int64  `json:"recipient_id,omitempty"`
 	Body            string `json:"body,omitempty"`
 	ClientMessageID string `json:"client_message_id,omitempty"`
+	MessageID       int64  `json:"message_id,omitempty"`
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -84,6 +86,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(pongWait)) })
 	s.Hub.register(c)
+	var initial []model.Message
+	if s.Service != nil {
+		// Claim before auth.ok. A caller that starts sending immediately after
+		// auth.ok cannot race this initial snapshot into a duplicate frame.
+		initial = s.claimPending(r.Context(), userID, true, 32)
+	}
 	// Register before auth.ok so a client that immediately sees the reply is
 	// already visible to shutdown and message delivery.
 	if err := conn.WriteJSON(map[string]any{"type": "auth.ok", "user_id": userID}); err != nil {
@@ -101,6 +109,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.Hub.unregister(c)
 		<-writerDone
 	}()
+	for _, message := range initial {
+		payload, err := messagePayload(message)
+		if err == nil {
+			c.enqueue(payload)
+		}
+	}
 	for {
 		messageType, frame, err := conn.ReadMessage()
 		if err != nil {
@@ -111,8 +125,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		var input incoming
-		if err := json.Unmarshal(frame, &input); err != nil || input.Type != "message.send" {
-			c.enqueueError("invalid_message", "message.send JSON frame required")
+		if err := json.Unmarshal(frame, &input); err != nil {
+			c.enqueueError("invalid_message", "valid JSON frame required")
+			continue
+		}
+		if input.Type == "delivery.ack" {
+			s.handleDeliveryAck(r.Context(), c, input.MessageID)
+			continue
+		}
+		if input.Type != "message.send" {
+			c.enqueueError("invalid_message", "message.send or delivery.ack required")
 			continue
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
@@ -135,13 +157,22 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			c.enqueueError("internal_error", "message was not saved")
 			continue
 		}
-		payload, err := json.Marshal(map[string]any{"type": "message.new", "message": message})
+		payload, err := messagePayload(message)
 		if err != nil {
 			slog.Error("encode message failed", "error", err)
 			c.enqueueError("internal_error", "message was saved; query history to recover")
 			continue
 		}
-		s.Hub.deliver(c.userID, payload)
+		if input.ClientMessageID != "" {
+			ack, _ := json.Marshal(map[string]any{
+				"type": "server_ack", "client_message_id": message.ClientMessageID,
+				"message_id": message.ID, "status": "persisted", "duplicate": !created,
+			})
+			c.enqueue(ack)
+		} else {
+			// Preserve the phase-one sender echo for legacy clients.
+			s.Hub.deliver(c.userID, payload)
+		}
 		if created && message.RecipientID != c.userID {
 			s.Hub.deliver(message.RecipientID, payload)
 		}
@@ -155,11 +186,86 @@ func writeBeforeStart(conn *ws.Conn, code, message string) {
 
 func (c *client) enqueueError(code, message string) {
 	payload, _ := json.Marshal(map[string]any{"type": "error", "code": code, "message": message})
+	c.enqueue(payload)
+}
+
+func (c *client) enqueue(payload []byte) {
 	select {
 	case c.send <- payload:
 	default:
 		c.close()
 	}
+}
+
+func messagePayload(message model.Message) ([]byte, error) {
+	return json.Marshal(map[string]any{"type": "message.new", "message": message})
+}
+
+func (s *Server) handleDeliveryAck(parent context.Context, c *client, messageID int64) {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	message, changed, err := s.Service.AcknowledgeDelivery(ctx, c.userID, messageID)
+	if errors.Is(err, service.ErrInvalidInput) {
+		c.enqueueError("invalid_message", "positive message_id required")
+		return
+	}
+	if errors.Is(err, repository.ErrNotFound) {
+		c.enqueueError("message_not_found", "message does not belong to this recipient")
+		return
+	}
+	if err != nil {
+		slog.Error("delivery ack failed", "error", err)
+		c.enqueueError("internal_error", "delivery acknowledgment was not saved")
+		return
+	}
+	confirmation, _ := json.Marshal(map[string]any{"type": "delivery.ack.ok", "message_id": message.ID, "status": message.DeliveryStatus})
+	c.enqueue(confirmation)
+	if changed {
+		status, _ := json.Marshal(map[string]any{"type": "message.status", "message_id": message.ID, "status": "delivered", "delivered_at": message.DeliveredAt})
+		s.Hub.deliver(message.SenderID, status)
+	}
+}
+
+// One retry worker per server scans only users with local connections. The
+// database claim bounds each pass; ACKs stop future claims.
+func (s *Server) RunRetryLoop(ctx context.Context) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, userID := range s.Hub.UserIDs() {
+				s.syncPending(ctx, userID, false)
+			}
+		}
+	}
+}
+
+func (s *Server) syncPending(parent context.Context, userID int64, force bool) {
+	// Stay below the 64-frame per-connection queue. Later ticks advance the
+	// cursor through additional due rows without a per-message goroutine.
+	messages := s.claimPending(parent, userID, force, 32)
+	for _, message := range messages {
+		payload, err := messagePayload(message)
+		if err != nil {
+			slog.Error("encode pending message failed", "message_id", message.ID, "error", err)
+			continue
+		}
+		s.Hub.deliver(userID, payload)
+	}
+}
+
+func (s *Server) claimPending(parent context.Context, userID int64, force bool, limit int) []model.Message {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	messages, err := s.Service.ClaimPending(ctx, userID, force, limit)
+	if err != nil {
+		slog.Error("pending sync failed", "user_id", userID, "error", err)
+		return nil
+	}
+	return messages
 }
 
 // Gorilla permits one concurrent reader and one concurrent writer per connection.
