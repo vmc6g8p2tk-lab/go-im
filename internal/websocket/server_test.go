@@ -1,13 +1,16 @@
 package websocket
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/example/go-im/internal/auth"
+	"github.com/example/go-im/internal/presence"
 	ws "github.com/gorilla/websocket"
 )
 
@@ -65,4 +68,45 @@ func TestDisallowedOriginRejected(t *testing.T) {
 	if err == nil || response == nil || response.StatusCode != http.StatusForbidden {
 		t.Fatalf("unexpected origin result: response=%v err=%v", response, err)
 	}
+}
+
+func TestAuthenticatedConnectionUpdatesRedisRoute(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	store := presence.New(redisServer.Addr(), "")
+	defer store.Close()
+	manager := auth.New([]byte(strings.Repeat("x", 32)))
+	hub := NewHub()
+	server := httptest.NewServer(&Server{Auth: manager, Hub: hub, Presence: store, InstanceID: "instance-1"})
+	defer server.Close()
+	url := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := ws.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	token, _, err := manager.Issue(77)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(map[string]string{"type": "auth", "token": token}); err != nil {
+		t.Fatal(err)
+	}
+	var reply struct {
+		Type string `json:"type"`
+	}
+	if err := conn.ReadJSON(&reply); err != nil || reply.Type != "auth.ok" {
+		t.Fatalf("auth reply=%+v err=%v", reply, err)
+	}
+	routes, err := store.Instances(context.Background(), 77)
+	if err != nil || len(routes) != 1 || routes[0] != "instance-1" {
+		t.Fatalf("routes=%v err=%v", routes, err)
+	}
+	redisServer.Close()
+	hub.mu.RLock()
+	localConnections := len(hub.clients[77])
+	hub.mu.RUnlock()
+	if localConnections != 1 {
+		t.Fatalf("Redis outage removed local connection: %d", localConnections)
+	}
+	hub.CloseAll()
 }

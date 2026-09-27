@@ -11,6 +11,8 @@ type Config struct {
 	DatabaseURL    string
 	JWTSecret      []byte
 	AllowedOrigins map[string]struct{}
+	RedisAddr      string
+	RedisPassword  string
 }
 
 func Load() (Config, error) {
@@ -19,6 +21,8 @@ func Load() (Config, error) {
 		DatabaseURL:    os.Getenv("DATABASE_URL"),
 		JWTSecret:      []byte(os.Getenv("JWT_SECRET")),
 		AllowedOrigins: make(map[string]struct{}),
+		RedisAddr:      os.Getenv("REDIS_ADDR"),
+		RedisPassword:  os.Getenv("REDIS_PASSWORD"),
 	}
 	if c.DatabaseURL == "" {
 		return Config{}, errors.New("DATABASE_URL is required")

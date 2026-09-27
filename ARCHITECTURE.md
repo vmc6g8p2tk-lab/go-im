@@ -40,11 +40,12 @@ Prometheus ← 指标端点；Grafana ← Prometheus
 | `internal/middleware` | HTTP Bearer JWT 鉴权 |
 | `internal/websocket` | 连接认证、读写循环、进程内 Hub |
 | `internal/auth` | 密码散列与 JWT 签发/验证 |
+| `internal/presence` | Redis 在线实例路由与过期过滤（可选） |
 | `migrations` | 纳入 Git 的有序 SQL 迁移 |
 | `deployments` | Docker Compose 与容器镜像 |
 | `tests` | 从外部调用真实服务的集成验证 |
 
-Redis、Kafka、监控的代码暂不加入，避免让未使用组件污染第一阶段链路。
+Redis 在线路由已作为可选组件接入；Kafka 与监控仍未接入。消息的唯一真相仍在 PostgreSQL。
 
 ## 5. 数据流
 
@@ -84,15 +85,15 @@ Redis、Kafka、监控的代码暂不加入，避免让未使用组件污染第�
 
 双向历史查询使用 `(sender_id, recipient_id, id DESC)` 索引；当前 SQL 合并两个方向并按 `id DESC` 截取，再正序返回。生产规模需要依据 `EXPLAIN ANALYZE` 和真实数据分布评估会话键、分区等方案。`id` 的顺序是数据库分配顺序，不承诺严格的客户端发送时间顺序。
 
-## 7. Redis Key 设计（后续阶段；本阶段不连接 Redis）
+## 7. Redis Key 设计（在线路由已接入；跨实例消费尚未实现）
 
 | Key | 类型 | 值/用途 | TTL |
 | --- | --- | --- | --- |
-| `im:presence:{user_id}` | Hash | `instance_id → 最近心跳时间`，多设备/多实例在线路由 | 心跳更新，短 TTL |
+| `im:route:{user_id}` | Sorted Set | member 为 `instance_id`，score 为最后心跳 Unix 毫秒；多个实例可同时在线 | 每 10 秒续期；30 秒后成员视为过期，Key TTL 60 秒 |
 | `im:rate:user:{user_id}` | String/计数器 | 每用户发送限流 | 窗口 TTL |
 | `im:session:revoked:{jti}` | String | 需立即撤销的 token 标记 | 至 JWT 到期 |
 
-Key 不存消息唯一真相。在线状态依赖心跳与过期机制，不能把 Redis Key 存在等同于“用户一定能收到消息”。上线前需明确隐私边界、原子操作和故障降级方式。
+服务连接成功后及每 10 秒按本实例在线用户批量 `ZADD`/`EXPIRE`。查询路由时按时间分数过滤并移除过期成员；整个实例崩溃后最多约 30 秒存在脏路由，且不能把路由存在等同于“用户一定能收到消息”。当前 Redis 不可用时只记录警告，本地单实例聊天和 PostgreSQL 持久化继续；跨实例在线查询和后续远程投递会降级。Key 不存消息唯一真相，`im:rate` 与 `im:session:revoked` 仍是后续设计，尚未实现。
 
 ## 8. WebSocket 消息协议
 
@@ -143,12 +144,12 @@ Key 不存消息唯一真相。在线状态依赖心跳与过期机制，不能�
 - 使用 SQL 迁移文件和独立迁移命令。数据库约束与服务层校验同时存在。
 - bcrypt 是方便验证的安全起点，但计算成本会影响登录吞吐；未来根据压测及安全要求评估 Argon2id。
 - 单实例 Hub 不跨实例同步。第一阶段的“在线”仅表示当前进程内连接。
-- Redis 虽完成 Key 设计，第一阶段 Compose 默认只启动必需的 PostgreSQL 和应用，降低验证链路复杂度。
+- Redis 在线路由可通过 `REDIS_ADDR` 启用；Compose 现包含 Redis，但尚未在本机实际验证容器启动。
 
 ## 11. 后续扩展方案
 
 1. 客户端消息 ID、ACK、重试和离线同步已经实现；继续补充会话 ID、跨实例投递及更完整的已读语义。
-2. 引入 Redis 管理带过期的在线路由和限流，测试 Redis 故障行为。
+2. Redis 在线路由已实现；继续做真实 Redis 故障验证与限流。
 3. 引入 Kafka 及 outbox/事务边界设计，明确数据库提交与事件发布的一致性。
 4. 扩展群聊、成员权限和扇出策略；用真实数据测试热点群场景。
 5. 先建立可复现的压测环境和原始数据，再添加 Prometheus/Grafana，记录吞吐、P95/P99、CPU、内存、错误率及测试配置。

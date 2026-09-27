@@ -11,6 +11,7 @@ import (
 
 	"github.com/example/go-im/internal/auth"
 	"github.com/example/go-im/internal/model"
+	"github.com/example/go-im/internal/presence"
 	"github.com/example/go-im/internal/repository"
 	"github.com/example/go-im/internal/service"
 	ws "github.com/gorilla/websocket"
@@ -29,6 +30,8 @@ type Server struct {
 	Service        *service.Service
 	Hub            *Hub
 	AllowedOrigins map[string]struct{}
+	Presence       *presence.RedisStore
+	InstanceID     string
 }
 
 type client struct {
@@ -86,6 +89,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(pongWait)) })
 	s.Hub.register(c)
+	if s.Presence != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		if err := s.Presence.Touch(ctx, userID, s.InstanceID); err != nil {
+			slog.Warn("Redis presence unavailable; local chat continues", "error", err)
+		}
+		cancel()
+	}
 	var initial []model.Message
 	if s.Service != nil {
 		// Claim before auth.ok. A caller that starts sending immediately after
@@ -240,6 +250,39 @@ func (s *Server) RunRetryLoop(ctx context.Context) {
 				s.syncPending(ctx, userID, false)
 			}
 		}
+	}
+}
+
+func (s *Server) RunPresenceLoop(ctx context.Context) {
+	if s.Presence == nil {
+		return
+	}
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			operationCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			if err := s.Presence.TouchMany(operationCtx, s.Hub.UserIDs(), s.InstanceID); err != nil {
+				slog.Warn("Redis presence heartbeat failed", "error", err)
+			}
+			cancel()
+		}
+	}
+}
+
+func (s *Server) RemoveLocalRoutes(ctx context.Context) {
+	if s.Presence == nil {
+		return
+	}
+	for _, userID := range s.Hub.UserIDs() {
+		operationCtx, cancel := context.WithTimeout(ctx, time.Second)
+		if err := s.Presence.Remove(operationCtx, userID, s.InstanceID); err != nil {
+			slog.Warn("Redis presence cleanup failed", "error", err)
+		}
+		cancel()
 	}
 }
 

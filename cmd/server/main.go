@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -15,6 +17,7 @@ import (
 	"github.com/example/go-im/internal/handler"
 	"github.com/example/go-im/internal/middleware"
 	"github.com/example/go-im/internal/migration"
+	"github.com/example/go-im/internal/presence"
 	"github.com/example/go-im/internal/repository"
 	"github.com/example/go-im/internal/service"
 	"github.com/example/go-im/internal/websocket"
@@ -49,16 +52,39 @@ func run() error {
 		return migration.Apply(ctx, pool, "migrations")
 	}
 	manager := auth.New(config.JWTSecret)
+	instanceID := os.Getenv("INSTANCE_ID")
+	if instanceID == "" {
+		var random [8]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return err
+		}
+		instanceID = hex.EncodeToString(random[:])
+	}
+	var presenceStore *presence.RedisStore
+	if config.RedisAddr != "" {
+		presenceStore = presence.New(config.RedisAddr, config.RedisPassword)
+		defer presenceStore.Close()
+		pingCtx, pingCancel := context.WithTimeout(ctx, time.Second)
+		if err := presenceStore.Ping(pingCtx); err != nil {
+			slog.Warn("Redis unavailable at startup; local chat continues", "error", err)
+		}
+		pingCancel()
+	}
 	store := &repository.Store{DB: pool}
 	svc := &service.Service{Store: store, Auth: manager}
 	api := &handler.API{Service: svc, DB: pool}
 	hub := websocket.NewHub()
-	wsServer := &websocket.Server{Auth: manager, Service: svc, Hub: hub, AllowedOrigins: config.AllowedOrigins}
+	wsServer := &websocket.Server{Auth: manager, Service: svc, Hub: hub, AllowedOrigins: config.AllowedOrigins, Presence: presenceStore, InstanceID: instanceID}
 	retryCtx, retryCancel := context.WithCancel(ctx)
 	retryDone := make(chan struct{})
 	go func() {
 		defer close(retryDone)
 		wsServer.RunRetryLoop(retryCtx)
+	}()
+	presenceDone := make(chan struct{})
+	go func() {
+		defer close(presenceDone)
+		wsServer.RunPresenceLoop(retryCtx)
 	}()
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/auth/register", api.Register)
@@ -85,6 +111,10 @@ func run() error {
 	}
 	retryCancel()
 	<-retryDone
+	<-presenceDone
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	wsServer.RemoveLocalRoutes(cleanupCtx)
+	cleanupCancel()
 	// Upgraded sockets are outside http.Server.Shutdown; close them explicitly.
 	hub.CloseAll()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)

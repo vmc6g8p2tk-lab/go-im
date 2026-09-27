@@ -70,3 +70,11 @@ ok  github.com/example/go-im/tests  1.097s
 - `TestOfflineSyncAcrossBatches`：发送 120 条离线消息，接收者跨多个 32 条批次收齐并逐条 ACK；数据库确认 120 条均为 `delivered`。首版 100 条重试批量曾使 64 帧队列满并断开连接；将单批降至 32 条后测试通过。这是实际发现并修复的背压问题，不是性能基准。
 
 上述证明单实例的数据库状态与重试行为；多实例、Redis/Kafka 故障和正式压测仍未验证。帧允许重复，客户端必须按 `message.id` 去重。
+
+## V1.0 迭代：Redis 在线路由（2026-09-27）
+
+`internal/presence` 使用 go-redis，单元测试在 `miniredis`（纯 Go Redis 协议模拟器）中验证多实例成员、30 秒过期过滤、移除与连接失败显式报错；WebSocket 测试验证认证连接写入路由，以及 Redis 模拟器关闭后本地 Hub 连接仍存在。`go test -count=1 ./internal/presence ./internal/websocket` 通过。
+
+加入 Redis 后再次运行带真实 PostgreSQL 端到端环境的 `go test -count=1 ./...`、`go vet ./...` 和 `go mod verify`，均通过。Compose YAML 可解析为 4 个服务；这只验证语法，不代表 Docker Compose 已启动。
+
+**真实 Redis Server 未验证**：当前 Windows 环境没有 Docker/Redis 服务。Compose 已加入 Redis 服务，但没有声称它已实际启动或验证跨实例路由。

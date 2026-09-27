@@ -15,6 +15,17 @@ services:
       timeout: 3s
       retries: 20
 
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
   migrate:
     build:
       context: ..
@@ -37,11 +48,15 @@ services:
       DATABASE_URL: postgres://im:${POSTGRES_PASSWORD}@postgres:5432/im?sslmode=disable
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:8080}
+      REDIS_ADDR: redis:6379
+      INSTANCE_ID: app1
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
       migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
