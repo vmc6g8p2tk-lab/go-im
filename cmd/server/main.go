@@ -19,6 +19,7 @@ import (
 	"github.com/example/go-im/internal/middleware"
 	"github.com/example/go-im/internal/migration"
 	"github.com/example/go-im/internal/presence"
+	"github.com/example/go-im/internal/ratelimit"
 	"github.com/example/go-im/internal/repository"
 	"github.com/example/go-im/internal/service"
 	"github.com/example/go-im/internal/websocket"
@@ -75,7 +76,9 @@ func run() error {
 	svc := &service.Service{Store: store, Auth: manager}
 	api := &handler.API{Service: svc, DB: pool}
 	hub := websocket.NewHub()
-	wsServer := &websocket.Server{Auth: manager, Service: svc, Hub: hub, AllowedOrigins: config.AllowedOrigins, Presence: presenceStore, InstanceID: instanceID}
+	wsServer := &websocket.Server{Auth: manager, Service: svc, Hub: hub, AllowedOrigins: config.AllowedOrigins,
+		Presence: presenceStore, InstanceID: instanceID,
+		UserLimiter: ratelimit.New(100, 200), ConnectionRate: 100, ConnectionBurst: 200}
 	var broker *messaging.Kafka
 	if config.KafkaBrokers != "" {
 		broker = messaging.New(config.KafkaBrokers, instanceID)
@@ -102,8 +105,8 @@ func run() error {
 		wsServer.RunPresenceLoop(retryCtx)
 	}()
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/auth/register", api.Register)
-	mux.HandleFunc("POST /v1/auth/login", api.Login)
+	mux.HandleFunc("POST /v1/auth/register", middleware.LimitIP(ratelimit.New(2, 100), api.Register))
+	mux.HandleFunc("POST /v1/auth/login", middleware.LimitIP(ratelimit.New(2, 100), api.Login))
 	mux.Handle("GET /v1/messages", middleware.RequireAuth(manager, http.HandlerFunc(api.History)))
 	mux.Handle("GET /v1/ws", wsServer)
 	mux.HandleFunc("GET /healthz", api.Health)

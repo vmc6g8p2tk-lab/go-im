@@ -96,3 +96,7 @@ ok  github.com/example/go-im/tests  1.097s
 ## V1.0 迭代：连接生命周期（2026-09-27）
 
 `TestDuplicateLoginAndUnexpectedDisconnect` 使用真实 WebSocket 测试同一用户同时建两条连接，第一条直接关闭后 Hub 保留第二条，第二条关闭后 Hub 不再保留该用户。配合已有 `TestCloseAllReleasesAuthenticatedConnection` 覆盖服务主动关闭。Redis 脏路由仍按 30 秒时间窗过滤，未宣称瞬时离线精确性。
+
+## V1.0 迭代：限流与基础安全（2026-09-27）
+
+`TestTokenBucketRefillAndIsolation` 验证突发、按时间补充令牌和不同 key 隔离；`TestLimitIPIgnoresUntrustedForwardedFor` 验证同一直接来源改写转发头后仍收到 HTTP 429；`TestWebSocketRateLimitAndSenderSpoofRejected` 使用真实 PostgreSQL + WebSocket 验证伪造字段被拒、单连接超额返回 `rate_limited` 且仅保存一条消息；`TestHistoryAuthorization` 验证匿名查询 401、第三方 JWT 不能通过请求参数读取其他人已保存的会话。上述测试均通过。生产默认额度与多实例全局效果尚未压测。

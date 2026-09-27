@@ -1,17 +1,21 @@
 package websocket
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/example/go-im/internal/auth"
 	"github.com/example/go-im/internal/model"
 	"github.com/example/go-im/internal/presence"
+	"github.com/example/go-im/internal/ratelimit"
 	"github.com/example/go-im/internal/repository"
 	"github.com/example/go-im/internal/service"
 	ws "github.com/gorilla/websocket"
@@ -26,13 +30,16 @@ const (
 )
 
 type Server struct {
-	Auth           *auth.Manager
-	Service        *service.Service
-	Hub            *Hub
-	AllowedOrigins map[string]struct{}
-	Presence       *presence.RedisStore
-	InstanceID     string
-	AsyncDelivery  bool
+	Auth            *auth.Manager
+	Service         *service.Service
+	Hub             *Hub
+	AllowedOrigins  map[string]struct{}
+	Presence        *presence.RedisStore
+	InstanceID      string
+	AsyncDelivery   bool
+	UserLimiter     *ratelimit.Limiter
+	ConnectionRate  float64
+	ConnectionBurst int
 }
 
 type client struct {
@@ -43,6 +50,7 @@ type client struct {
 	once     sync.Once
 	slowOnce sync.Once
 	onSlow   func()
+	limiter  *ratelimit.Limiter
 }
 
 func (c *client) close() {
@@ -90,6 +98,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	c := &client{conn: conn, userID: userID, send: make(chan []byte, 64), done: make(chan struct{}),
 		onSlow: func() { s.Hub.slowConsumers.Add(1) }}
+	if s.ConnectionRate > 0 && s.ConnectionBurst > 0 {
+		c.limiter = ratelimit.New(s.ConnectionRate, s.ConnectionBurst)
+	}
 	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(pongWait)) })
 	s.Hub.register(c)
@@ -139,7 +150,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		var input incoming
-		if err := json.Unmarshal(frame, &input); err != nil {
+		decoder := json.NewDecoder(bytes.NewReader(frame))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&input); err != nil {
+			c.enqueueError("invalid_message", "valid JSON frame required")
+			continue
+		}
+		if err := decoder.Decode(new(any)); err != io.EOF {
 			c.enqueueError("invalid_message", "valid JSON frame required")
 			continue
 		}
@@ -149,6 +166,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if input.Type != "message.send" {
 			c.enqueueError("invalid_message", "message.send or delivery.ack required")
+			continue
+		}
+		if (c.limiter != nil && !c.limiter.Allow("send")) || (s.UserLimiter != nil && !s.UserLimiter.Allow(strconv.FormatInt(c.userID, 10))) {
+			c.enqueueError("rate_limited", "message rate exceeded")
 			continue
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
