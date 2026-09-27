@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/example/go-im/internal/auth"
+	"github.com/example/go-im/internal/repository"
 	"github.com/example/go-im/internal/service"
 	ws "github.com/gorilla/websocket"
 )
@@ -45,10 +46,11 @@ func (c *client) close() {
 }
 
 type incoming struct {
-	Type        string `json:"type"`
-	Token       string `json:"token,omitempty"`
-	RecipientID int64  `json:"recipient_id,omitempty"`
-	Body        string `json:"body,omitempty"`
+	Type            string `json:"type"`
+	Token           string `json:"token,omitempty"`
+	RecipientID     int64  `json:"recipient_id,omitempty"`
+	Body            string `json:"body,omitempty"`
+	ClientMessageID string `json:"client_message_id,omitempty"`
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +116,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		message, err := s.Service.SendMessage(ctx, c.userID, input.RecipientID, input.Body)
+		message, created, err := s.Service.SendMessage(ctx, c.userID, input.RecipientID, input.Body, input.ClientMessageID)
 		cancel()
 		if errors.Is(err, service.ErrInvalidInput) {
 			c.enqueueError("invalid_message", "recipient_id and nonempty body of at most 4000 bytes required")
@@ -122,6 +124,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, service.ErrRecipientNotFound) {
 			c.enqueueError("recipient_not_found", "recipient does not exist")
+			continue
+		}
+		if errors.Is(err, repository.ErrIdempotencyConflict) {
+			c.enqueueError("idempotency_conflict", "client_message_id already belongs to different content")
 			continue
 		}
 		if err != nil {
@@ -136,7 +142,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		s.Hub.deliver(c.userID, payload)
-		if message.RecipientID != c.userID {
+		if created && message.RecipientID != c.userID {
 			s.Hub.deliver(message.RecipientID, payload)
 		}
 	}

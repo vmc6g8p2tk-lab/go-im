@@ -18,6 +18,7 @@ var ErrInvalidCredentials = errors.New("invalid credentials")
 var ErrRecipientNotFound = errors.New("recipient not found")
 
 var usernamePattern = regexp.MustCompile(`^[a-z0-9_]{3,32}$`)
+var clientMessageIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 type Service struct {
 	Store *repository.Store
@@ -55,18 +56,19 @@ func (s *Service) Login(ctx context.Context, username, password string) (model.U
 	return user, token, expires, err
 }
 
-func (s *Service) SendMessage(ctx context.Context, senderID, recipientID int64, body string) (model.Message, error) {
-	if senderID <= 0 || recipientID <= 0 || !utf8.ValidString(body) || len(body) > 4000 || strings.TrimSpace(body) == "" {
-		return model.Message{}, ErrInvalidInput
+func (s *Service) SendMessage(ctx context.Context, senderID, recipientID int64, body, clientMessageID string) (model.Message, bool, error) {
+	clientMessageID = strings.ToLower(clientMessageID)
+	if senderID <= 0 || recipientID <= 0 || !utf8.ValidString(body) || len(body) > 4000 || strings.TrimSpace(body) == "" || (clientMessageID != "" && !clientMessageIDPattern.MatchString(clientMessageID)) {
+		return model.Message{}, false, ErrInvalidInput
 	}
 	exists, err := s.Store.UserExists(ctx, recipientID)
 	if err != nil {
-		return model.Message{}, err
+		return model.Message{}, false, err
 	}
 	if !exists {
-		return model.Message{}, ErrRecipientNotFound
+		return model.Message{}, false, ErrRecipientNotFound
 	}
-	return s.Store.SaveMessage(ctx, senderID, recipientID, body)
+	return s.Store.SaveMessage(ctx, senderID, recipientID, body, clientMessageID)
 }
 
 func (s *Service) History(ctx context.Context, userID, peerID, beforeID int64, limit int) ([]model.Message, error) {

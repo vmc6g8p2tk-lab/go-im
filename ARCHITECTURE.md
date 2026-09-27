@@ -75,6 +75,7 @@ Redis、Kafka、监控的代码暂不加入，避免让未使用组件污染第�
 | `sender_id` | `BIGINT` | 非空，外键 `users(id)` |
 | `recipient_id` | `BIGINT` | 非空，外键 `users(id)` |
 | `body` | `TEXT` | 非空，长度由应用和数据库约束 |
+| `client_message_id` | `UUID` | 非空；`(sender_id, client_message_id)` 唯一，旧客户端由数据库生成 |
 | `created_at` | `TIMESTAMPTZ` | 非空，默认 `now()` |
 
 双向历史查询使用 `(sender_id, recipient_id, id DESC)` 索引；当前 SQL 合并两个方向并按 `id DESC` 截取，再正序返回。生产规模需要依据 `EXPLAIN ANALYZE` 和真实数据分布评估会话键、分区等方案。`id` 的顺序是数据库分配顺序，不承诺严格的客户端发送时间顺序。
@@ -96,12 +97,16 @@ Key 不存消息唯一真相。在线状态依赖心跳与过期机制，不能�
 ```json
 {"type":"auth","token":"<JWT>"}
 {"type":"auth.ok","user_id":1}
-{"type":"message.send","recipient_id":2,"body":"你好"}
-{"type":"message.new","message":{"id":7,"sender_id":1,"recipient_id":2,"body":"你好","created_at":"2026-09-27T08:00:00Z"}}
+{"type":"message.send","recipient_id":2,"client_message_id":"0c0dcce8-7a12-4f9d-8827-0527722092b1","body":"你好"}
+{"type":"message.new","message":{"id":7,"client_message_id":"0c0dcce8-7a12-4f9d-8827-0527722092b1","sender_id":1,"recipient_id":2,"body":"你好","created_at":"2026-09-27T08:00:00Z"}}
 {"type":"error","code":"invalid_message","message":"..."}
 ```
 
-`message.new` 同时回显给发送者并发送给接收者的本实例连接。发送者以数据库 `id` 对账。连接写操作由单独的 writer goroutine 串行执行，待发队列有界；慢连接被关闭以保护进程内存。服务端定期 Ping，客户端须回应 Pong。第一阶段不定义 ACK、自动重试或端到端去重；客户端重发可能产生重复记录。
+`message.new` 同时回显给发送者并发送给接收者的本实例连接。客户端重发相同 `client_message_id` 和内容时，服务端回显原数据库 ID，不再向接收方主动扇出；重用相同 ID 发送不同内容返回 `idempotency_conflict`。旧客户端不传 ID 时由数据库生成新 UUID，以保持第一阶段协议兼容，但旧客户端重发仍可能创建新消息。客户端应自己生成并持久保存 UUID，直到知道服务器结果。接收方在后续 ACK/重试阶段仍可能收到重复帧，需以服务器消息 ID 去重。连接写操作由单独的 writer goroutine 串行执行，待发队列有界；慢连接被关闭以保护进程内存。服务端定期 Ping，客户端须回应 Pong。当前尚无 delivery ACK。
+
+### 已实现的发送幂等
+
+数据库的 `(sender_id, client_message_id)` 唯一索引是跨 goroutine、跨进程、重启后仍有效的仲裁点。插入采用 `ON CONFLICT DO NOTHING`；冲突后读取原消息并比较接收方与正文。只在真正新建时向接收方主动扇出。内存去重无法跨服务重启，也无法阻止两个实例同时写入。这个约束保证**一条逻辑消息记录**，不等于实时帧恰好送达一次。
 
 ## 9. HTTP API 设计
 
@@ -126,7 +131,7 @@ Key 不存消息唯一真相。在线状态依赖心跳与过期机制，不能�
 
 ## 11. 后续扩展方案
 
-1. 定义会话 ID、客户端消息 ID、唯一约束和幂等行为；补充 ACK、重试、离线同步。
+1. 客户端消息 ID 与数据库唯一约束已经实现；继续补充 ACK、重试、离线同步及会话 ID。
 2. 引入 Redis 管理带过期的在线路由和限流，测试 Redis 故障行为。
 3. 引入 Kafka 及 outbox/事务边界设计，明确数据库提交与事件发布的一致性。
 4. 扩展群聊、成员权限和扇出策略；用真实数据测试热点群场景。
