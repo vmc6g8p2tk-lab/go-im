@@ -1,10 +1,14 @@
 package websocket
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 type Hub struct {
-	mu      sync.RWMutex
-	clients map[int64]map[*client]struct{}
+	mu            sync.RWMutex
+	clients       map[int64]map[*client]struct{}
+	slowConsumers atomic.Uint64
 }
 
 func NewHub() *Hub { return &Hub{clients: make(map[int64]map[*client]struct{})} }
@@ -32,13 +36,11 @@ func (h *Hub) deliver(userID int64, payload []byte) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for c := range h.clients[userID] {
-		select {
-		case c.send <- payload:
-		default:
-			c.close()
-		}
+		c.enqueue(payload)
 	}
 }
+
+func (h *Hub) SlowConsumerDisconnects() uint64 { return h.slowConsumers.Load() }
 
 func (h *Hub) CloseAll() {
 	h.mu.RLock()

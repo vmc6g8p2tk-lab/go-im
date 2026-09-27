@@ -36,11 +36,13 @@ type Server struct {
 }
 
 type client struct {
-	conn   *ws.Conn
-	userID int64
-	send   chan []byte
-	done   chan struct{}
-	once   sync.Once
+	conn     *ws.Conn
+	userID   int64
+	send     chan []byte
+	done     chan struct{}
+	once     sync.Once
+	slowOnce sync.Once
+	onSlow   func()
 }
 
 func (c *client) close() {
@@ -86,7 +88,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close()
 		return
 	}
-	c := &client{conn: conn, userID: userID, send: make(chan []byte, 64), done: make(chan struct{})}
+	c := &client{conn: conn, userID: userID, send: make(chan []byte, 64), done: make(chan struct{}),
+		onSlow: func() { s.Hub.slowConsumers.Add(1) }}
 	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(pongWait)) })
 	s.Hub.register(c)
@@ -224,8 +227,19 @@ func (c *client) enqueueError(code, message string) {
 
 func (c *client) enqueue(payload []byte) {
 	select {
-	case c.send <- payload:
+	case <-c.done:
+		return
 	default:
+	}
+	select {
+	case c.send <- payload:
+	case <-c.done:
+	default:
+		c.slowOnce.Do(func() {
+			if c.onSlow != nil {
+				c.onSlow()
+			}
+		})
 		c.close()
 	}
 }

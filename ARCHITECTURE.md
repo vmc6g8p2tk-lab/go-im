@@ -112,7 +112,7 @@ Redis 在线路由和 Kafka 发布/消费代码可选接入；监控仍未接入
 {"type":"error","code":"invalid_message","message":"..."}
 ```
 
-现代客户端发送后得到 `server_ack`，只表示 PostgreSQL 已保存；旧客户端不传 ID 时仍收到第一阶段的 `message.new` 回显。客户端重发相同 `client_message_id` 和内容时，服务端返回原数据库 ID，不再向接收方主动扇出；重用相同 ID 发送不同内容返回 `idempotency_conflict`。旧客户端不传 ID 时由数据库生成新 UUID，但其重发仍可能创建新消息。客户端应自己生成并持久保存 UUID，直到得到 `server_ack`。接收方可能收到重复 `message.new` 帧，必须以服务器消息 ID 去重并可重复 ACK。连接写操作由单独的 writer goroutine 串行执行，待发队列有界；慢连接被关闭以保护进程内存。服务端定期 Ping，客户端须回应 Pong。
+现代客户端发送后得到 `server_ack`，只表示 PostgreSQL 已保存；旧客户端不传 ID 时仍收到第一阶段的 `message.new` 回显。客户端重发相同 `client_message_id` 和内容时，服务端返回原数据库 ID，不再向接收方主动扇出；重用相同 ID 发送不同内容返回 `idempotency_conflict`。旧客户端不传 ID 时由数据库生成新 UUID，但其重发仍可能创建新消息。客户端应自己生成并持久保存 UUID，直到得到 `server_ack`。接收方可能收到重复 `message.new` 帧，必须以服务器消息 ID 去重并可重复 ACK。连接写操作由单独的 writer goroutine 串行执行，待发队列每连接固定 64 帧；队列满关闭慢连接并只记录一次断开计数，未确认消息从数据库恢复。服务端定期 Ping，客户端须回应 Pong。同一用户可在多个连接登录，当前不踢出旧设备。
 
 ### 已实现的发送幂等
 

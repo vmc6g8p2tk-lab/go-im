@@ -88,3 +88,7 @@ ok  github.com/example/go-im/tests  1.097s
 `TestTwoProcessesDatabaseFallbackAndReconnect` 启动两个真实服务操作系统进程，分别连接真实 PostgreSQL 与 `miniredis`。A 连进程 1，B 连进程 2；A 发消息后，B 由数据库重试循环收到并 ACK。随后强制结束进程 2，A 再发消息，B 重连进程 1 并同步同一条未确认消息；Redis 模拟器中的 B 路由出现进程 1，PostgreSQL 核查两条消息记录。测试通过。首次使用 5 秒读取超时失败：新消息的 `next_delivery_at` 初值是写入后 5 秒，轮询可能再等约 2 秒；改用 10 秒观察窗口后通过。这个测试**未启用 Kafka**，只验证数据库补发跨进程恢复路径。进程 2 的旧 Redis 路由需靠 30 秒心跳过期过滤，测试未等待该窗口。
 
 新二进制运行在本地 `127.0.0.1:18080`、未设置 Redis/Kafka 的兼容模式下，`go test -count=1 ./...`、`go vet ./...`、`go mod verify` 均通过；此前第一阶段端到端测试仍通过。Compose YAML 静态解析识别 7 个服务，但本机无 Docker，因此 **真实 Kafka、真实 Redis、Compose 启动和 Kafka 多实例链路均未验证**。没有生成或宣称任何吞吐、延迟、CPU、内存数据。
+
+## V1.0 迭代：慢消费者（2026-09-27）
+
+`TestFullSendQueueClosesSlowConnectionOnce` 使用真实 WebSocket 连接，但测试服务故意不运行写协程，使 1 帧测试队列确定性填满；第二次投递关闭连接，重复投递后慢消费者断开计数仍为 1，客户端读到连接关闭。测试通过。生产连接队列仍固定 64 帧；尚未对真实慢网络、长时间连接数或内存上限做压测。
