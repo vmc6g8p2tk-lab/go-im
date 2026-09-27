@@ -92,3 +92,7 @@ ok  github.com/example/go-im/tests  1.097s
 ## V1.0 迭代：慢消费者（2026-09-27）
 
 `TestFullSendQueueClosesSlowConnectionOnce` 使用真实 WebSocket 连接，但测试服务故意不运行写协程，使 1 帧测试队列确定性填满；第二次投递关闭连接，重复投递后慢消费者断开计数仍为 1，客户端读到连接关闭。测试通过。生产连接队列仍固定 64 帧；尚未对真实慢网络、长时间连接数或内存上限做压测。
+
+## V1.0 迭代：连接生命周期（2026-09-27）
+
+`TestDuplicateLoginAndUnexpectedDisconnect` 使用真实 WebSocket 测试同一用户同时建两条连接，第一条直接关闭后 Hub 保留第二条，第二条关闭后 Hub 不再保留该用户。配合已有 `TestCloseAllReleasesAuthenticatedConnection` 覆盖服务主动关闭。Redis 脏路由仍按 30 秒时间窗过滤，未宣称瞬时离线精确性。
