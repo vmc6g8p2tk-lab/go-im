@@ -51,7 +51,11 @@ func (k *Kafka) Publish(ctx context.Context, event repository.OutboxEvent) error
 	}
 	// Recipient ID preserves per-recipient partition order. PostgreSQL IDs and
 	// the ACK protocol remain authoritative across retries and replay.
-	return k.writer.WriteMessages(ctx, kafka.Message{Key: []byte(strconv.FormatInt(event.RecipientID, 10)), Value: value})
+	key := "u:" + strconv.FormatInt(event.RecipientID, 10)
+	if event.GroupID > 0 {
+		key = "g:" + strconv.FormatInt(event.GroupID, 10)
+	}
+	return k.writer.WriteMessages(ctx, kafka.Message{Key: []byte(key), Value: value})
 }
 
 func (k *Kafka) RunConsumer(ctx context.Context, handle func(context.Context, repository.OutboxEvent) error) {
@@ -66,7 +70,7 @@ func (k *Kafka) RunConsumer(ctx context.Context, handle func(context.Context, re
 			continue
 		}
 		var event repository.OutboxEvent
-		if err := json.Unmarshal(message.Value, &event); err != nil || event.MessageID <= 0 || event.RecipientID <= 0 {
+		if err := json.Unmarshal(message.Value, &event); err != nil || event.MessageID <= 0 || (event.RecipientID <= 0 && event.GroupID <= 0) || (event.RecipientID > 0 && event.GroupID > 0) {
 			slog.Error("invalid Kafka event", "error", err)
 		} else {
 			for ctx.Err() == nil {
@@ -100,6 +104,20 @@ func RunPublisher(ctx context.Context, store *repository.Store, publish func(con
 		cancel()
 		if err != nil {
 			slog.Warn("Kafka outbox publish failed", "error", err)
+			wait(ctx, 2*time.Second)
+		} else if !found {
+			wait(ctx, 200*time.Millisecond)
+		}
+	}
+}
+
+func RunGroupPublisher(ctx context.Context, store *repository.Store, publish func(context.Context, repository.OutboxEvent) error) {
+	for ctx.Err() == nil {
+		operationCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		found, err := store.PublishNextGroup(operationCtx, publish)
+		cancel()
+		if err != nil {
+			slog.Warn("Kafka group outbox publish failed", "error", err)
 			wait(ctx, 2*time.Second)
 		} else if !found {
 			wait(ctx, 200*time.Millisecond)

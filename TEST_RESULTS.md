@@ -100,3 +100,11 @@ ok  github.com/example/go-im/tests  1.097s
 ## V1.0 迭代：限流与基础安全（2026-09-27）
 
 `TestTokenBucketRefillAndIsolation` 验证突发、按时间补充令牌和不同 key 隔离；`TestLimitIPIgnoresUntrustedForwardedFor` 验证同一直接来源改写转发头后仍收到 HTTP 429；`TestWebSocketRateLimitAndSenderSpoofRejected` 使用真实 PostgreSQL + WebSocket 验证伪造字段被拒、单连接超额返回 `rate_limited` 且仅保存一条消息；`TestHistoryAuthorization` 验证匿名查询 401、第三方 JWT 不能通过请求参数读取其他人已保存的会话。上述测试均通过。生产默认额度与多实例全局效果尚未压测。
+
+## V1.0 迭代：基础群聊（2026-09-27 至 2026-09-28）
+
+在同一真实 PostgreSQL 18.3 上执行迁移 `015`–`023`；`TestGroupMembershipFanoutHistoryAndIdempotency` 通过新 Go 服务的真实 HTTP/WebSocket 路径验证建群、三用户加入、群主移除成员、非群主移除被拒、非成员发消息及查历史被拒、两个在线成员收到同一群消息、重复 UUID 只保留一行、`group_message_outbox` 有且仅有一行、成员退群后不能查历史、群主不能直接退群。`TestCrossInstanceConsumerDelivery` 追加群事件消费边界注入，第二个本地 Hub 收到群消息；该测试共用真实 PostgreSQL 和模拟 Redis，**并非真实 Kafka Broker**。
+
+`TestConcurrentGroupJoinRespectsHundredMemberCap` 使用真实 PostgreSQL 创建群主与 105 个候选用户，并发加入后恰好 99 人成功、6 人得到 `group_full`，连同群主正好 100 人；测试通过。这只验证成员上限，不是 100 人同时在线扇出压测。
+
+2026-09-28 重测时本地临时 PostgreSQL 进程已停止，第一次运行报连接拒绝；重新启动原数据目录后 `TestCrossInstanceConsumerDelivery` 通过。该环境中断不计为群功能通过或性能结果。随后在新服务二进制、真实 PostgreSQL 环境运行 `go test -count=1 ./...`、`go vet ./...`、`go mod verify`，全部通过。真实 Kafka 群扇出及大量离线成员尚未做实测。

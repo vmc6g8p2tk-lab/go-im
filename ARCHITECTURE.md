@@ -109,6 +109,8 @@ Redis 在线路由和 Kafka 发布/消费代码可选接入；监控仍未接入
 {"type":"delivery.ack","message_id":7}
 {"type":"delivery.ack.ok","message_id":7,"status":"delivered"}
 {"type":"message.status","message_id":7,"status":"delivered","delivered_at":"2026-09-27T08:00:01Z"}
+{"type":"group.send","group_id":3,"client_message_id":"19d0ef20-a829-43b7-917e-c08707e3e918","body":"大家好"}
+{"type":"group.message.new","message":{"id":9,"group_id":3,"sender_id":1,"client_message_id":"19d0ef20-a829-43b7-917e-c08707e3e918","body":"大家好","created_at":"2026-09-27T08:00:02Z"}}
 {"type":"error","code":"invalid_message","message":"..."}
 ```
 
@@ -134,6 +136,14 @@ Topic `im.message.created.v1` 使用接收者 ID 作为 Partition Key。同一�
 
 配置 `KAFKA_BROKERS` 后，新消息不再直接投递本地接收连接，而是由 Kafka 消费链路投递；发送方的 `server_ack` 仍在数据库写入后立刻返回。Kafka 不可用时消息与 outbox 留在 PostgreSQL；在线接收者可被现有数据库重试循环补发，离线接收者下次连接同步。Kafka 消费重放可能生成重复 WebSocket 帧，但不能新建第二条逻辑消息；接收方应按 `message.id` 去重、重复 ACK。跨实例 ACK 的 `message.status` 目前只通知 ACK 所在实例的发送方连接，其他实例的发送方需查历史状态，此缺口待修复。
 
+### 基础群聊（最多 100 人）
+
+`chat_groups` 保存群 ID、群主与名称；`group_members(group_id,user_id)` 是成员唯一约束，角色为 `owner/member`；`group_messages` 保存群 ID、发送者、客户端消息 UUID、正文与时间，`(sender_id,client_message_id)` 唯一索引保证群消息重试幂等；`group_message_outbox` 由数据库触发器随群消息同事务创建。加入群时锁住群行并统计成员，最多 100 人。非成员不能发送或查看群历史；群主不能直接退群，只有群主能移除普通成员。群主转让、群删除、群消息 ACK 和离线主动推送尚未实现，离线成员通过历史 API 查询。
+
+WebSocket `group.send` 入库后返回 `server_ack`；Kafka 未配置时只向本实例在线成员发送 `group.message.new`。配置 Kafka 后，一条群事件由各实例独立消费组接收，各实例查询最多 100 个成员，仅投递本地连接。重复 Kafka 事件可能产生重复帧，客户端按群消息 ID 去重。当前群事件共用 `im.message.created.v1` Topic，Partition Key 为 `g:{group_id}`，直聊使用 `u:{recipient_id}`。真实 Kafka 群扇出尚未验证。
+
+扇出规模取舍：100 人群可在每实例查询成员并对本地连接做有界队列投递；1 万人群不应每实例全量查询/消费，需按在线路由分片、批量扇出并分离在线与离线通知；10 万人群需要频道式拉取、消息游标或专用大群架构，不能为每成员即时写一条投递状态。当前数据库和消费组方案只为 100 人上限设计，未做大群性能声明。
+
 ## 9. HTTP API 设计
 
 统一使用 `application/json`；错误格式为 `{"error":{"code":"...","message":"..."}}`。
@@ -145,6 +155,12 @@ Topic `im.message.created.v1` 使用接收者 ID 作为 Partition Key。同一�
 | `GET /v1/messages?peer_id=2&limit=50&before_id=100` | Bearer JWT | `200 {"messages":[...]}` | `before_id` 可省；`limit` 默认 50、最多 100 |
 | `GET /healthz` | 无 | `200 {"status":"ok"}` | 检查数据库连通性 |
 | `GET /v1/ws` | WebSocket 首帧认证 | WebSocket 协议 | `Origin` 按配置白名单校验 |
+| `POST /v1/groups` | Bearer JWT，`{"name":"..."}` | `201 {"group":...}` | 创建者自动成为群主 |
+| `POST /v1/groups/{id}/join` | Bearer JWT | `200 {"status":"joined"}` | 开放加入，最多 100 人 |
+| `DELETE /v1/groups/{id}/members/me` | Bearer JWT | `200 {"status":"left"}` | 群主不可直接退出 |
+| `DELETE /v1/groups/{id}/members/{user_id}` | 群主 Bearer JWT | `200 {"status":"removed"}` | 移除普通成员 |
+| `GET /v1/groups/{id}/members` | 成员 Bearer JWT | `200 {"members":[...]}` | 非成员 403 |
+| `GET /v1/groups/{id}/messages?limit=50&before_id=100` | 成员 Bearer JWT | `200 {"messages":[...]}` | 按消息 ID 分页 |
 
 ## 10. 当前阶段的技术取舍
 

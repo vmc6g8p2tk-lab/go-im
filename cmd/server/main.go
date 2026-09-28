@@ -86,12 +86,15 @@ func run() error {
 	}
 	retryCtx, retryCancel := context.WithCancel(ctx)
 	kafkaPublisherDone := make(chan struct{})
+	groupPublisherDone := make(chan struct{})
 	kafkaConsumerDone := make(chan struct{})
 	if broker != nil {
 		go func() { defer close(kafkaPublisherDone); messaging.RunPublisher(retryCtx, store, broker.Publish) }()
 		go func() { defer close(kafkaConsumerDone); broker.RunConsumer(retryCtx, wsServer.HandleOutboxEvent) }()
+		go func() { defer close(groupPublisherDone); messaging.RunGroupPublisher(retryCtx, store, broker.Publish) }()
 	} else {
 		close(kafkaPublisherDone)
+		close(groupPublisherDone)
 		close(kafkaConsumerDone)
 	}
 	retryDone := make(chan struct{})
@@ -108,6 +111,12 @@ func run() error {
 	mux.HandleFunc("POST /v1/auth/register", middleware.LimitIP(ratelimit.New(2, 100), api.Register))
 	mux.HandleFunc("POST /v1/auth/login", middleware.LimitIP(ratelimit.New(2, 100), api.Login))
 	mux.Handle("GET /v1/messages", middleware.RequireAuth(manager, http.HandlerFunc(api.History)))
+	mux.Handle("POST /v1/groups", middleware.RequireAuth(manager, http.HandlerFunc(api.CreateGroup)))
+	mux.Handle("POST /v1/groups/{id}/join", middleware.RequireAuth(manager, http.HandlerFunc(api.JoinGroup)))
+	mux.Handle("DELETE /v1/groups/{id}/members/me", middleware.RequireAuth(manager, http.HandlerFunc(api.LeaveGroup)))
+	mux.Handle("DELETE /v1/groups/{id}/members/{user_id}", middleware.RequireAuth(manager, http.HandlerFunc(api.RemoveGroupMember)))
+	mux.Handle("GET /v1/groups/{id}/members", middleware.RequireAuth(manager, http.HandlerFunc(api.GroupMembers)))
+	mux.Handle("GET /v1/groups/{id}/messages", middleware.RequireAuth(manager, http.HandlerFunc(api.GroupHistory)))
 	mux.Handle("GET /v1/ws", wsServer)
 	mux.HandleFunc("GET /healthz", api.Health)
 	server := &http.Server{
@@ -131,6 +140,7 @@ func run() error {
 	<-retryDone
 	<-presenceDone
 	<-kafkaPublisherDone
+	<-groupPublisherDone
 	<-kafkaConsumerDone
 	if broker != nil {
 		broker.Close()

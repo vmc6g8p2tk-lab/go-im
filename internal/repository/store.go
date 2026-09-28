@@ -23,6 +23,7 @@ type Store struct{ DB *pgxpool.Pool }
 type OutboxEvent struct {
 	MessageID   int64 `json:"message_id"`
 	RecipientID int64 `json:"recipient_id"`
+	GroupID     int64 `json:"group_id,omitempty"`
 }
 
 // PublishNext keeps the row locked until Kafka confirms the write. A crash

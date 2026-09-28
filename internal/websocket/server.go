@@ -64,6 +64,7 @@ type incoming struct {
 	Type            string `json:"type"`
 	Token           string `json:"token,omitempty"`
 	RecipientID     int64  `json:"recipient_id,omitempty"`
+	GroupID         int64  `json:"group_id,omitempty"`
 	Body            string `json:"body,omitempty"`
 	ClientMessageID string `json:"client_message_id,omitempty"`
 	MessageID       int64  `json:"message_id,omitempty"`
@@ -164,12 +165,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.handleDeliveryAck(r.Context(), c, input.MessageID)
 			continue
 		}
-		if input.Type != "message.send" {
-			c.enqueueError("invalid_message", "message.send or delivery.ack required")
+		if input.Type != "message.send" && input.Type != "group.send" {
+			c.enqueueError("invalid_message", "message.send, group.send or delivery.ack required")
 			continue
 		}
 		if (c.limiter != nil && !c.limiter.Allow("send")) || (s.UserLimiter != nil && !s.UserLimiter.Allow(strconv.FormatInt(c.userID, 10))) {
 			c.enqueueError("rate_limited", "message rate exceeded")
+			continue
+		}
+		if input.Type == "group.send" {
+			s.handleGroupSend(r.Context(), c, input)
 			continue
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
@@ -218,6 +223,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Replays have no database side effect. Clients deduplicate repeated frames by
 // message.id, since a crash can replay a published event.
 func (s *Server) HandleOutboxEvent(ctx context.Context, event repository.OutboxEvent) error {
+	if event.GroupID > 0 {
+		message, err := s.Service.Store.GroupMessageByID(ctx, event.MessageID)
+		if err != nil {
+			return err
+		}
+		if message.GroupID != event.GroupID {
+			return errors.New("Kafka group does not match message")
+		}
+		return s.deliverGroupLocally(ctx, message)
+	}
 	message, err := s.Service.Store.MessageByID(ctx, event.MessageID)
 	if err != nil {
 		return err
@@ -234,6 +249,58 @@ func (s *Server) HandleOutboxEvent(ctx context.Context, event repository.OutboxE
 	}
 	s.Hub.deliver(message.RecipientID, payload)
 	return nil
+}
+
+func groupPayload(message model.GroupMessage) ([]byte, error) {
+	return json.Marshal(map[string]any{"type": "group.message.new", "message": message})
+}
+
+// Groups are capped at 100 members in V1.0. Kafka sends one group event per
+// message; each instance fans out only to its own connected members.
+func (s *Server) deliverGroupLocally(ctx context.Context, message model.GroupMessage) error {
+	members, err := s.Service.Store.GroupMemberIDs(ctx, message.GroupID)
+	if err != nil {
+		return err
+	}
+	payload, err := groupPayload(message)
+	if err != nil {
+		return err
+	}
+	for _, userID := range members {
+		s.Hub.deliver(userID, payload)
+	}
+	return nil
+}
+
+func (s *Server) handleGroupSend(parent context.Context, c *client, input incoming) {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	message, created, err := s.Service.SendGroupMessage(ctx, input.GroupID, c.userID, input.Body, input.ClientMessageID)
+	if errors.Is(err, service.ErrInvalidInput) {
+		c.enqueueError("invalid_message", "valid group_id, body and client_message_id required")
+		return
+	}
+	if errors.Is(err, repository.ErrForbidden) {
+		c.enqueueError("forbidden", "group membership required")
+		return
+	}
+	if errors.Is(err, repository.ErrIdempotencyConflict) {
+		c.enqueueError("idempotency_conflict", "client_message_id already belongs to different content")
+		return
+	}
+	if err != nil {
+		slog.Error("save group message failed", "error", err)
+		c.enqueueError("internal_error", "group message was not saved")
+		return
+	}
+	ack, _ := json.Marshal(map[string]any{"type": "server_ack", "client_message_id": message.ClientMessageID,
+		"message_id": message.ID, "group_id": message.GroupID, "status": "persisted", "duplicate": !created})
+	c.enqueue(ack)
+	if created && !s.AsyncDelivery {
+		if err := s.deliverGroupLocally(ctx, message); err != nil {
+			slog.Error("local group fanout failed", "error", err)
+		}
+	}
 }
 
 func writeBeforeStart(conn *ws.Conn, code, message string) {

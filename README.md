@@ -1,6 +1,6 @@
 # Go 即时通信系统 · V1.0 迭代中
 
-本项目按阶段构建可解释、可验证的即时通信系统。已实现注册、登录、JWT、WebSocket 单聊、PostgreSQL 落库、历史查询、客户端消息 ID 幂等、送达 ACK、未确认消息重试及离线补发。Redis 在线实例路由与 Kafka outbox 跨实例事件代码已接入；真实 Kafka Broker 和容器环境尚未验证。双进程数据库补发路径已实测。**尚无并发性能结论。** [架构设计](ARCHITECTURE.md)解释目标与后续边界，[学习记录](LEARNING.md)解释关键实现及面试问答。
+本项目按阶段构建可解释、可验证的即时通信系统。已实现注册、登录、JWT、WebSocket 单聊、PostgreSQL 落库、历史查询、客户端消息 ID 幂等、送达 ACK、未确认消息重试、离线补发与基础百人群聊。Redis 在线实例路由与 Kafka outbox 跨实例事件代码已接入；真实 Kafka Broker 和容器环境尚未验证。双进程数据库补发路径已实测。**尚无并发性能结论。** [架构设计](ARCHITECTURE.md)解释目标与后续边界，[学习记录](LEARNING.md)解释关键实现及面试问答。
 
 ## 环境与启动
 
@@ -33,6 +33,8 @@ WebSocket 地址是 `ws://localhost:8080/v1/ws`。升级后首帧发送 `{"type"
 
 传入 `client_message_id` 的发送者收到 `server_ack`，它只表示消息已落库；接收者收到 `message.new` 后发送 `{"type":"delivery.ack","message_id":7}`，数据库状态才进入 `delivered`。旧客户端不传 ID 时保留第一阶段的发送者 `message.new` 回显。离线或 ACK 丢失会使同一消息帧重现，客户端需按服务器消息 ID 去重。重试批量与边界见架构文档。
 
+基础群聊通过 `POST /v1/groups` 建群，`POST /v1/groups/{id}/join` 加入；WebSocket 发送 `{"type":"group.send","group_id":3,"client_message_id":"UUID","body":"大家好"}`。群消息只入库一行，在线成员收到 `group.message.new`；群历史和成员操作见 [ARCHITECTURE.md](ARCHITECTURE.md)。V1.0 限制每群最多 100 人，离线群消息通过历史 API 查询，暂无逐成员群 ACK。
+
 ## 测试与数据库核查
 
 ```powershell
@@ -53,6 +55,7 @@ internal/auth          密码散列、JWT
 internal/config        环境配置
 internal/handler       HTTP 接口
 internal/middleware    Bearer 鉴权
+internal/ratelimit     进程内令牌桶
 internal/migration     迁移执行器
 internal/messaging     Kafka outbox 发布与消费
 internal/model         数据结构

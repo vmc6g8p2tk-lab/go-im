@@ -105,4 +105,21 @@ func TestCrossInstanceConsumerDelivery(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM messages WHERE id=$1 AND delivery_status='delivered'`, messageID).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("persisted logical message count=%d err=%v", count, err)
 	}
+	group, err := svc.CreateGroup(ctx, a.ID, "cross instance group")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.JoinGroup(ctx, group.ID, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	groupMessage, created, err := svc.SendGroupMessage(ctx, group.ID, a.ID, "group across instances", newClientMessageID(t))
+	if err != nil || !created {
+		t.Fatalf("save group message: created=%v err=%v", created, err)
+	}
+	if err := bServer.HandleOutboxEvent(ctx, repository.OutboxEvent{MessageID: groupMessage.ID, GroupID: group.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if frame, err := readTypedFrame(bc); err != nil || frame.Type != "group.message.new" {
+		t.Fatalf("cross-instance group frame=%+v err=%v", frame, err)
+	}
 }
