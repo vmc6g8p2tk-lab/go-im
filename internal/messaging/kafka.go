@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/example/go-im/internal/metrics"
 	"github.com/example/go-im/internal/repository"
 	kafka "github.com/segmentio/kafka-go"
 )
@@ -17,8 +18,9 @@ const Topic = "im.message.created.v1"
 // Each instance has its own consumer group so every process can deliver to
 // its own local sockets. This is simple but costs O(instances) Kafka reads.
 type Kafka struct {
-	writer *kafka.Writer
-	reader *kafka.Reader
+	writer  *kafka.Writer
+	reader  *kafka.Reader
+	Metrics *metrics.Metrics
 }
 
 func New(brokers, instanceID string) *Kafka {
@@ -55,19 +57,36 @@ func (k *Kafka) Publish(ctx context.Context, event repository.OutboxEvent) error
 	if event.GroupID > 0 {
 		key = "g:" + strconv.FormatInt(event.GroupID, 10)
 	}
-	return k.writer.WriteMessages(ctx, kafka.Message{Key: []byte(key), Value: value})
+	err = k.writer.WriteMessages(ctx, kafka.Message{Key: []byte(key), Value: value})
+	if k.Metrics != nil {
+		result := "ok"
+		value := float64(1)
+		if err != nil {
+			result = "error"
+			value = 0
+		}
+		k.Metrics.KafkaProducerUp.Set(value)
+		k.Metrics.KafkaPublished.WithLabelValues(result).Inc()
+	}
+	return err
 }
 
 func (k *Kafka) RunConsumer(ctx context.Context, handle func(context.Context, repository.OutboxEvent) error) {
 	for ctx.Err() == nil {
 		message, err := k.reader.FetchMessage(ctx)
 		if err != nil {
+			if k.Metrics != nil {
+				k.Metrics.KafkaConsumerUp.Set(0)
+			}
 			if ctx.Err() != nil {
 				return
 			}
 			slog.Warn("Kafka fetch failed", "error", err)
 			wait(ctx, time.Second)
 			continue
+		}
+		if k.Metrics != nil {
+			k.Metrics.KafkaConsumerUp.Set(1)
 		}
 		var event repository.OutboxEvent
 		if err := json.Unmarshal(message.Value, &event); err != nil || event.MessageID <= 0 || (event.RecipientID <= 0 && event.GroupID <= 0) || (event.RecipientID > 0 && event.GroupID > 0) {
@@ -78,7 +97,13 @@ func (k *Kafka) RunConsumer(ctx context.Context, handle func(context.Context, re
 				err = handle(operationCtx, event)
 				cancel()
 				if err == nil {
+					if k.Metrics != nil {
+						k.Metrics.KafkaConsumed.WithLabelValues("ok").Inc()
+					}
 					break
+				}
+				if k.Metrics != nil {
+					k.Metrics.KafkaConsumed.WithLabelValues("error").Inc()
 				}
 				slog.Warn("Kafka event handling failed", "message_id", event.MessageID, "error", err)
 				wait(ctx, time.Second)

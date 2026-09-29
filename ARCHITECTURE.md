@@ -25,7 +25,7 @@ WebSocket 客户端 ── 认证/单聊 ──────┘    │
 Prometheus ← 指标端点；Grafana ← Prometheus
 ```
 
-幂等键、ACK、数据库重试与 Kafka outbox 已进入代码。群聊、限流、指标和正式压测仍未完成。真实 Kafka 容器还未运行，不能仅凭代码和模拟测试宣称跨实例 Broker 链路已验证。
+幂等键、ACK、数据库重试、Kafka outbox、百人群聊、限流与指标端点已进入代码。正式压测仍未完成。真实 Kafka/Prometheus/Grafana 容器还未运行，不能仅凭代码和模拟测试宣称跨实例 Broker 或监控面板链路已验证。
 
 ## 4. 组件职责与目录
 
@@ -42,11 +42,16 @@ Prometheus ← 指标端点；Grafana ← Prometheus
 | `internal/auth` | 密码散列与 JWT 签发/验证 |
 | `internal/presence` | Redis 在线实例路由与过期过滤（可选） |
 | `internal/messaging` | Kafka outbox 发布与每实例消费组 |
+| `internal/metrics` | Prometheus 指标注册、数据库查询追踪与 `/metrics` |
 | `migrations` | 纳入 Git 的有序 SQL 迁移 |
 | `deployments` | Docker Compose 与容器镜像 |
 | `tests` | 从外部调用真实服务的集成验证 |
 
-Redis 在线路由和 Kafka 发布/消费代码可选接入；监控仍未接入。消息的唯一真相仍在 PostgreSQL。
+Redis 在线路由和 Kafka 发布/消费代码可选接入；监控指标已接入 Go 服务，Prometheus/Grafana 容器尚未实测。消息的唯一真相仍在 PostgreSQL。
+
+### 可观测性边界
+
+`/metrics` 提供本实例连接数、队列帧数、消息创建/重复/失败数、入队/丢弃数、首次送达 ACK 数与延迟直方图、消息处理时长、断连与慢消费者数、PostgreSQL 查询时长、Redis 操作时长、Kafka 发布/消费尝试以及最后一次操作状态。另有 Go runtime 和进程指标。`im_delivery_enqueue_total{result="queued"}` 只表示写入本地有界队列，不能解释为客户端收到；只有 `im_delivery_confirmed_total` 对应持久化的接收方 ACK。Kafka up Gauge 反映最近一次发布或读取的结果，不是持续连接探针。指标标签只使用固定的消息种类、结果和操作名，避免把用户 ID、SQL 或消息内容放进标签。Compose 将 Grafana/Prometheus 绑定本机端口；部署到公共网络时应在网关限制 `/metrics` 访问。
 
 ## 5. 数据流
 
@@ -168,7 +173,7 @@ WebSocket `group.send` 入库后返回 `server_ack`；Kafka 未配置时只向�
 - 环境变量提供连接串、JWT 密钥、监听地址和允许的 WebSocket Origin。密钥不进入仓库；`.env.example` 仅给占位符。
 - 使用 SQL 迁移文件和独立迁移命令。数据库约束与服务层校验同时存在。
 - bcrypt 是方便验证的安全起点，但计算成本会影响登录吞吐；未来根据压测及安全要求评估 Argon2id。
-- Hub 只管理本实例连接；Kafka 每实例独立消费组负责跨实例事件传播，数据库补发为恢复路径。真实 Kafka 与进程级跨实例链路尚未验证。
+- Hub 只管理本实例连接；Kafka 每实例独立消费组负责跨实例事件传播，数据库补发为恢复路径。双进程数据库补发已验证，真实 Kafka 跨实例链路尚未验证。
 - Redis 在线路由可通过 `REDIS_ADDR` 启用；Compose 现包含 Redis，但尚未在本机实际验证容器启动。
 - 注册与登录在进程内按直接连接 IP 令牌桶限流（每秒补 2 个、突发 100 个）；WebSocket 文本发送按连接及用户分别每秒补 100 个、突发 200 个。`X-Forwarded-For` 未经可信代理验证时不参与身份判定。此限制只在单进程生效，多实例累计配额会放大，需在网关或 Redis 实现全局限流。JSON 请求/帧与 WebSocket 帧大小均受限；身份始终取 JWT，不信任客户端提供的 `sender_id`。
 
@@ -178,5 +183,5 @@ WebSocket `group.send` 入库后返回 `server_ack`；Kafka 未配置时只向�
 2. Redis 在线路由已实现；继续做真实 Redis 故障验证与限流。
 3. Kafka/outbox 代码已实现；在真实 Broker 上验证消费组、重复事件、重启、故障与顺序，再考虑定向分发以降低 O(实例数) 成本。
 4. 扩展群聊、成员权限和扇出策略；用真实数据测试热点群场景。
-5. 先建立可复现的压测环境和原始数据，再添加 Prometheus/Grafana，记录吞吐、P95/P99、CPU、内存、错误率及测试配置。
+5. Prometheus 指标与 Grafana 配置已加入；先建立可复现的压测环境和原始数据，再记录吞吐、P95/P99、CPU、内存、错误率及测试配置。
 6. 多实例部署和故障演练，验证断线恢复、重复投递、消息顺序与资源上限。

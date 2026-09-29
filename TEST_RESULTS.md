@@ -108,3 +108,9 @@ ok  github.com/example/go-im/tests  1.097s
 `TestConcurrentGroupJoinRespectsHundredMemberCap` 使用真实 PostgreSQL 创建群主与 105 个候选用户，并发加入后恰好 99 人成功、6 人得到 `group_full`，连同群主正好 100 人；测试通过。这只验证成员上限，不是 100 人同时在线扇出压测。
 
 2026-09-28 重测时本地临时 PostgreSQL 进程已停止，第一次运行报连接拒绝；重新启动原数据目录后 `TestCrossInstanceConsumerDelivery` 通过。该环境中断不计为群功能通过或性能结果。随后在新服务二进制、真实 PostgreSQL 环境运行 `go test -count=1 ./...`、`go vet ./...`、`go mod verify`，全部通过。真实 Kafka 群扇出及大量离线成员尚未做实测。
+
+## V1.0 迭代：指标与面板配置（2026-09-29）
+
+在本地真实 Go 进程与 PostgreSQL 上实际访问 `GET /metrics`，初次抓取显示 `im_websocket_connections 0`、`im_websocket_send_queue_frames 0`、`im_kafka_producer_up 0`、`im_kafka_consumer_up 0`、`go_goroutines 11`；Kafka 相关配置未启用，0 不代表已验证 Broker 故障。随后运行完整端到端测试，第二次实际抓取显示 `im_messages_total{kind="direct",result="created"} 168`、`im_delivery_confirmed_total 124`、`im_ack_latency_seconds_count 124`、`im_db_operation_seconds_count{result="ok"} 625`，连接和队列深度在测试结束后均为 0。这些只是本次混合功能测试的**累计计数**，不是 QPS、吞吐、延迟分位或容量基准。
+
+`TestMetricsExpositionUsesActualObservations` 验证 Registry 导出的计数器、Gauge 和 Redis 操作直方图；新的服务二进制下 `go test -count=1 ./...`、`go vet ./...`、`go mod verify` 均通过。Compose、Prometheus、Grafana provisioning YAML 通过静态解析，Grafana Dashboard JSON 可解析且包含 10 个面板。`scripts/init-env.ps1` 对已有 `.env` 补充随机 Grafana 密码，再次运行未产生重复条目。当前无 Docker，因此 **Prometheus 抓取、Grafana 面板显示、容器启动和截图未验证**。

@@ -16,6 +16,7 @@ import (
 	"github.com/example/go-im/internal/config"
 	"github.com/example/go-im/internal/handler"
 	"github.com/example/go-im/internal/messaging"
+	"github.com/example/go-im/internal/metrics"
 	"github.com/example/go-im/internal/middleware"
 	"github.com/example/go-im/internal/migration"
 	"github.com/example/go-im/internal/presence"
@@ -40,7 +41,13 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	pool, err := pgxpool.New(ctx, config.DatabaseURL)
+	observability := metrics.New()
+	poolConfig, err := pgxpool.ParseConfig(config.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	poolConfig.ConnConfig.Tracer = metrics.DBTracer{Metrics: observability}
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		return err
 	}
@@ -65,6 +72,7 @@ func run() error {
 	var presenceStore *presence.RedisStore
 	if config.RedisAddr != "" {
 		presenceStore = presence.New(config.RedisAddr, config.RedisPassword)
+		presenceStore.Metrics = observability
 		defer presenceStore.Close()
 		pingCtx, pingCancel := context.WithTimeout(ctx, time.Second)
 		if err := presenceStore.Ping(pingCtx); err != nil {
@@ -76,12 +84,15 @@ func run() error {
 	svc := &service.Service{Store: store, Auth: manager}
 	api := &handler.API{Service: svc, DB: pool}
 	hub := websocket.NewHub()
+	hub.Metrics = observability
+	observability.RegisterHubGauges(func() float64 { connections, _ := hub.Stats(); return connections }, func() float64 { _, depth := hub.Stats(); return depth })
 	wsServer := &websocket.Server{Auth: manager, Service: svc, Hub: hub, AllowedOrigins: config.AllowedOrigins,
 		Presence: presenceStore, InstanceID: instanceID,
-		UserLimiter: ratelimit.New(100, 200), ConnectionRate: 100, ConnectionBurst: 200}
+		UserLimiter: ratelimit.New(100, 200), ConnectionRate: 100, ConnectionBurst: 200, Metrics: observability}
 	var broker *messaging.Kafka
 	if config.KafkaBrokers != "" {
 		broker = messaging.New(config.KafkaBrokers, instanceID)
+		broker.Metrics = observability
 		wsServer.AsyncDelivery = true
 	}
 	retryCtx, retryCancel := context.WithCancel(ctx)
@@ -119,6 +130,7 @@ func run() error {
 	mux.Handle("GET /v1/groups/{id}/messages", middleware.RequireAuth(manager, http.HandlerFunc(api.GroupHistory)))
 	mux.Handle("GET /v1/ws", wsServer)
 	mux.HandleFunc("GET /healthz", api.Health)
+	mux.Handle("GET /metrics", observability.Handler())
 	server := &http.Server{
 		Addr:              config.Addr,
 		Handler:           mux,

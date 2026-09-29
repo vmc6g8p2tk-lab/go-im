@@ -3,6 +3,7 @@ package presence
 import (
 	"context"
 	"fmt"
+	"github.com/example/go-im/internal/metrics"
 	"strconv"
 	"time"
 
@@ -15,8 +16,9 @@ const keyTTL = 60 * time.Second
 // RedisStore is a soft routing hint. PostgreSQL remains the source of truth
 // for messages; missing or stale presence never deletes a pending message.
 type RedisStore struct {
-	client *redis.Client
-	now    func() time.Time
+	client  *redis.Client
+	now     func() time.Time
+	Metrics *metrics.Metrics
 }
 
 func New(addr, password string) *RedisStore {
@@ -28,7 +30,15 @@ func New(addr, password string) *RedisStore {
 
 func (s *RedisStore) Close() error { return s.client.Close() }
 
-func (s *RedisStore) Ping(ctx context.Context) error { return s.client.Ping(ctx).Err() }
+func (s *RedisStore) Ping(ctx context.Context) (err error) {
+	started := time.Now()
+	defer func() {
+		if s.Metrics != nil {
+			s.Metrics.ObserveRedis("ping", started, err)
+		}
+	}()
+	return s.client.Ping(ctx).Err()
+}
 
 func RouteKey(userID int64) string { return fmt.Sprintf("im:route:%d", userID) }
 
@@ -36,7 +46,13 @@ func (s *RedisStore) Touch(ctx context.Context, userID int64, instanceID string)
 	return s.TouchMany(ctx, []int64{userID}, instanceID)
 }
 
-func (s *RedisStore) TouchMany(ctx context.Context, userIDs []int64, instanceID string) error {
+func (s *RedisStore) TouchMany(ctx context.Context, userIDs []int64, instanceID string) (err error) {
+	started := time.Now()
+	defer func() {
+		if s.Metrics != nil {
+			s.Metrics.ObserveRedis("touch", started, err)
+		}
+	}()
 	for start := 0; start < len(userIDs); start += 128 {
 		end := min(start+128, len(userIDs))
 		pipe := s.client.TxPipeline()
@@ -52,11 +68,23 @@ func (s *RedisStore) TouchMany(ctx context.Context, userIDs []int64, instanceID 
 	return nil
 }
 
-func (s *RedisStore) Remove(ctx context.Context, userID int64, instanceID string) error {
+func (s *RedisStore) Remove(ctx context.Context, userID int64, instanceID string) (err error) {
+	started := time.Now()
+	defer func() {
+		if s.Metrics != nil {
+			s.Metrics.ObserveRedis("remove", started, err)
+		}
+	}()
 	return s.client.ZRem(ctx, RouteKey(userID), instanceID).Err()
 }
 
-func (s *RedisStore) Instances(ctx context.Context, userID int64) ([]string, error) {
+func (s *RedisStore) Instances(ctx context.Context, userID int64) (instances []string, err error) {
+	started := time.Now()
+	defer func() {
+		if s.Metrics != nil {
+			s.Metrics.ObserveRedis("instances", started, err)
+		}
+	}()
 	key := RouteKey(userID)
 	cutoff := s.now().Add(-staleAfter).UnixMilli()
 	if err := s.client.ZRemRangeByScore(ctx, key, "-inf", strconv.FormatInt(cutoff-1, 10)).Err(); err != nil {

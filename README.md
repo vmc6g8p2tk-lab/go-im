@@ -1,6 +1,6 @@
 # Go 即时通信系统 · V1.0 迭代中
 
-本项目按阶段构建可解释、可验证的即时通信系统。已实现注册、登录、JWT、WebSocket 单聊、PostgreSQL 落库、历史查询、客户端消息 ID 幂等、送达 ACK、未确认消息重试、离线补发与基础百人群聊。Redis 在线实例路由与 Kafka outbox 跨实例事件代码已接入；真实 Kafka Broker 和容器环境尚未验证。双进程数据库补发路径已实测。**尚无并发性能结论。** [架构设计](ARCHITECTURE.md)解释目标与后续边界，[学习记录](LEARNING.md)解释关键实现及面试问答。
+本项目按阶段构建可解释、可验证的即时通信系统。已实现注册、登录、JWT、WebSocket 单聊、PostgreSQL 落库、历史查询、客户端消息 ID 幂等、送达 ACK、未确认消息重试、离线补发与基础百人群聊。Redis 在线实例路由、Kafka outbox 跨实例事件代码和 Prometheus 指标端点已接入；真实 Kafka Broker 和监控容器环境尚未验证。双进程数据库补发路径已实测。**尚无并发性能结论。** [架构设计](ARCHITECTURE.md)解释目标与后续边界，[学习记录](LEARNING.md)解释关键实现及面试问答。
 
 ## 环境与启动
 
@@ -16,7 +16,7 @@ docker compose --env-file .env -f deployments/compose.yaml ps
 Invoke-RestMethod http://localhost:8080/healthz
 ```
 
-`init-env.ps1` 只在 `.env` 不存在时生成随机开发密钥，文件已被 Git 忽略。PostgreSQL 数据保存在 Compose volume 中。迁移容器先执行 `migrations/*.sql`，成功后应用才启动；不要手动修改生产表结构。停止服务用 `docker compose --env-file .env -f deployments/compose.yaml down`，此命令保留数据卷。
+`init-env.ps1` 生成随机开发密钥；已有 `.env` 时只补缺失的 Grafana 密码。该文件已被 Git 忽略。PostgreSQL 数据保存在 Compose volume 中。迁移容器先执行 `migrations/*.sql`，成功后应用才启动；不要手动修改生产表结构。停止服务用 `docker compose --env-file .env -f deployments/compose.yaml down`，此命令保留数据卷。
 
 若 5432/8080 已被占用，需调整 Compose 端口映射；若改动数据库密码但复用旧 volume，旧数据库密码不会自动变化。测试环境可先明确备份后清理 volume 再初始化。
 
@@ -34,6 +34,10 @@ WebSocket 地址是 `ws://localhost:8080/v1/ws`。升级后首帧发送 `{"type"
 传入 `client_message_id` 的发送者收到 `server_ack`，它只表示消息已落库；接收者收到 `message.new` 后发送 `{"type":"delivery.ack","message_id":7}`，数据库状态才进入 `delivered`。旧客户端不传 ID 时保留第一阶段的发送者 `message.new` 回显。离线或 ACK 丢失会使同一消息帧重现，客户端需按服务器消息 ID 去重。重试批量与边界见架构文档。
 
 基础群聊通过 `POST /v1/groups` 建群，`POST /v1/groups/{id}/join` 加入；WebSocket 发送 `{"type":"group.send","group_id":3,"client_message_id":"UUID","body":"大家好"}`。群消息只入库一行，在线成员收到 `group.message.new`；群历史和成员操作见 [ARCHITECTURE.md](ARCHITECTURE.md)。V1.0 限制每群最多 100 人，离线群消息通过历史 API 查询，暂无逐成员群 ACK。
+
+## 监控
+
+Go 服务在 `GET /metrics` 暴露 Prometheus 指标；本地 Compose 配置 Prometheus `http://localhost:9090` 和 Grafana `http://localhost:3000`。Grafana 管理员密码由 `.env` 中的 `GRAFANA_ADMIN_PASSWORD` 提供，面板配置在 [im-overview.json](deployments/grafana/dashboards/im-overview.json)。当前抓取配置监控默认 `app` 实例；启用 `multi` profile 时，应在 [prometheus.yml](deployments/prometheus.yml) 增加 `app2:8080` 目标。Grafana 截图应在真实容器启动并产生测试流量后保存至 `docs/screenshots/`；仓库现在没有截图或性能数字。`/metrics` 应只在受信网络开放。
 
 ## 测试与数据库核查
 
@@ -58,6 +62,7 @@ internal/middleware    Bearer 鉴权
 internal/ratelimit     进程内令牌桶
 internal/migration     迁移执行器
 internal/messaging     Kafka outbox 发布与消费
+internal/metrics       Prometheus 指标与数据库查询追踪
 internal/model         数据结构
 internal/presence      Redis 在线实例路由
 internal/repository    PostgreSQL SQL
@@ -77,4 +82,4 @@ tests                  真实服务端到端测试
 - `go.mod` 暂用 `github.com/example/go-im`，发布到你的 GitHub 仓库前应替换为实际仓库路径并更新 Go import。
 - 历史查询分页按数据库消息 ID，而非全局严格时间顺序。
 
-Kafka/outbox 代码可用 `KAFKA_BROKERS` 启用；未设置时沿用单实例即时投递。`docker compose --profile multi --env-file .env -f deployments/compose.yaml up --build -d` 配置第二个服务实例（8081）；本机没有 Docker，Compose 及真实 Broker **未验证**。每实例独立消费组使 Kafka 读取成本随实例数增加。群聊、监控、正式压测仍未实现。真实 Redis 与 Compose 启动尚未在本机验证。
+Kafka/outbox 代码可用 `KAFKA_BROKERS` 启用；未设置时沿用单实例即时投递。`docker compose --profile multi --env-file .env -f deployments/compose.yaml up --build -d` 配置第二个服务实例（8081）；本机没有 Docker，Compose 及真实 Broker **未验证**。每实例独立消费组使 Kafka 读取成本随实例数增加。群离线消息目前通过历史 API 查询，尚无逐成员 ACK。正式压测仍未执行。真实 Redis 与 Compose 启动尚未在本机验证。

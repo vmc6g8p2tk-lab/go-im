@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/example/go-im/internal/auth"
+	"github.com/example/go-im/internal/metrics"
 	"github.com/example/go-im/internal/model"
 	"github.com/example/go-im/internal/presence"
 	"github.com/example/go-im/internal/ratelimit"
@@ -40,6 +41,7 @@ type Server struct {
 	UserLimiter     *ratelimit.Limiter
 	ConnectionRate  float64
 	ConnectionBurst int
+	Metrics         *metrics.Metrics
 }
 
 type client struct {
@@ -98,7 +100,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := &client{conn: conn, userID: userID, send: make(chan []byte, 64), done: make(chan struct{}),
-		onSlow: func() { s.Hub.slowConsumers.Add(1) }}
+		onSlow: func() {
+			s.Hub.slowConsumers.Add(1)
+			if s.Metrics != nil {
+				s.Metrics.SlowConsumers.Inc()
+			}
+		}}
 	if s.ConnectionRate > 0 && s.ConnectionBurst > 0 {
 		c.limiter = ratelimit.New(s.ConnectionRate, s.ConnectionBurst)
 	}
@@ -134,6 +141,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.close()
 		s.Hub.unregister(c)
 		<-writerDone
+		if s.Metrics != nil {
+			s.Metrics.Disconnects.Inc()
+		}
 	}()
 	for _, message := range initial {
 		payload, err := messagePayload(message)
@@ -178,8 +188,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		started := time.Now()
 		message, created, err := s.Service.SendMessage(ctx, c.userID, input.RecipientID, input.Body, input.ClientMessageID)
 		cancel()
+		if s.Metrics != nil {
+			s.Metrics.MessageDuration.WithLabelValues("direct").Observe(time.Since(started).Seconds())
+			result := "created"
+			if err != nil {
+				result = "error"
+			} else if !created {
+				result = "duplicate"
+			}
+			s.Metrics.Messages.WithLabelValues("direct", result).Inc()
+		}
 		if errors.Is(err, service.ErrInvalidInput) {
 			c.enqueueError("invalid_message", "recipient_id and nonempty body of at most 4000 bytes required")
 			continue
@@ -275,7 +296,18 @@ func (s *Server) deliverGroupLocally(ctx context.Context, message model.GroupMes
 func (s *Server) handleGroupSend(parent context.Context, c *client, input incoming) {
 	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
+	started := time.Now()
 	message, created, err := s.Service.SendGroupMessage(ctx, input.GroupID, c.userID, input.Body, input.ClientMessageID)
+	if s.Metrics != nil {
+		s.Metrics.MessageDuration.WithLabelValues("group").Observe(time.Since(started).Seconds())
+		result := "created"
+		if err != nil {
+			result = "error"
+		} else if !created {
+			result = "duplicate"
+		}
+		s.Metrics.Messages.WithLabelValues("group", result).Inc()
+	}
 	if errors.Is(err, service.ErrInvalidInput) {
 		c.enqueueError("invalid_message", "valid group_id, body and client_message_id required")
 		return
@@ -313,15 +345,17 @@ func (c *client) enqueueError(code, message string) {
 	c.enqueue(payload)
 }
 
-func (c *client) enqueue(payload []byte) {
+func (c *client) enqueue(payload []byte) bool {
 	select {
 	case <-c.done:
-		return
+		return false
 	default:
 	}
 	select {
 	case c.send <- payload:
+		return true
 	case <-c.done:
+		return false
 	default:
 		c.slowOnce.Do(func() {
 			if c.onSlow != nil {
@@ -329,6 +363,7 @@ func (c *client) enqueue(payload []byte) {
 			}
 		})
 		c.close()
+		return false
 	}
 }
 
@@ -356,6 +391,12 @@ func (s *Server) handleDeliveryAck(parent context.Context, c *client, messageID 
 	confirmation, _ := json.Marshal(map[string]any{"type": "delivery.ack.ok", "message_id": message.ID, "status": message.DeliveryStatus})
 	c.enqueue(confirmation)
 	if changed {
+		if s.Metrics != nil {
+			s.Metrics.DeliveryConfirmed.Inc()
+			if message.DeliveredAt != nil {
+				s.Metrics.AckLatency.Observe(message.DeliveredAt.Sub(message.CreatedAt).Seconds())
+			}
+		}
 		status, _ := json.Marshal(map[string]any{"type": "message.status", "message_id": message.ID, "status": "delivered", "delivered_at": message.DeliveredAt})
 		s.Hub.deliver(message.SenderID, status)
 	}

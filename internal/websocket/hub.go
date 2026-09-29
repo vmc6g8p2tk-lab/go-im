@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"github.com/example/go-im/internal/metrics"
 	"sync"
 	"sync/atomic"
 )
@@ -9,6 +10,7 @@ type Hub struct {
 	mu            sync.RWMutex
 	clients       map[int64]map[*client]struct{}
 	slowConsumers atomic.Uint64
+	Metrics       *metrics.Metrics
 }
 
 func NewHub() *Hub { return &Hub{clients: make(map[int64]map[*client]struct{})} }
@@ -36,8 +38,27 @@ func (h *Hub) deliver(userID int64, payload []byte) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for c := range h.clients[userID] {
-		c.enqueue(payload)
+		queued := c.enqueue(payload)
+		if h.Metrics != nil {
+			result := "dropped"
+			if queued {
+				result = "queued"
+			}
+			h.Metrics.DeliveryEnqueue.WithLabelValues(result).Inc()
+		}
 	}
+}
+
+func (h *Hub) Stats() (connections, queueDepth float64) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, userClients := range h.clients {
+		for c := range userClients {
+			connections++
+			queueDepth += float64(len(c.send))
+		}
+	}
+	return
 }
 
 func (h *Hub) SlowConsumerDisconnects() uint64 { return h.slowConsumers.Load() }
