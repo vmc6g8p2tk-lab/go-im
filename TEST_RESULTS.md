@@ -114,3 +114,7 @@ ok  github.com/example/go-im/tests  1.097s
 在本地真实 Go 进程与 PostgreSQL 上实际访问 `GET /metrics`，初次抓取显示 `im_websocket_connections 0`、`im_websocket_send_queue_frames 0`、`im_kafka_producer_up 0`、`im_kafka_consumer_up 0`、`go_goroutines 11`；Kafka 相关配置未启用，0 不代表已验证 Broker 故障。随后运行完整端到端测试，第二次实际抓取显示 `im_messages_total{kind="direct",result="created"} 168`、`im_delivery_confirmed_total 124`、`im_ack_latency_seconds_count 124`、`im_db_operation_seconds_count{result="ok"} 625`，连接和队列深度在测试结束后均为 0。这些只是本次混合功能测试的**累计计数**，不是 QPS、吞吐、延迟分位或容量基准。
 
 `TestMetricsExpositionUsesActualObservations` 验证 Registry 导出的计数器、Gauge 和 Redis 操作直方图；新的服务二进制下 `go test -count=1 ./...`、`go vet ./...`、`go mod verify` 均通过。Compose、Prometheus、Grafana provisioning YAML 通过静态解析，Grafana Dashboard JSON 可解析且包含 10 个面板。`scripts/init-env.ps1` 对已有 `.env` 补充随机 Grafana 密码，再次运行未产生重复条目。当前无 Docker，因此 **Prometheus 抓取、Grafana 面板显示、容器启动和截图未验证**。
+
+## V1.0 迭代：Docker 开发环境静态检查（2026-09-29）
+
+对照 Apache Kafka 官方单节点 KRaft 配置，补充 Kafka 数据卷、固定开发集群 ID、日志目录与单节点内部 Topic 复制因子；Compose YAML 重新解析得到 9 个服务。`scripts/verify-compose.ps1` 提供有 Docker 时的配置校验、启动、健康探测和 Topic 核查入口，PowerShell 语法解析为 0 个错误。本机 `docker` 与 `docker-compose` 命令均不存在，**没有执行 `docker compose config`、镜像构建、容器启动或脚本运行**；这些仍需安装并启动 Docker Desktop 后验证。

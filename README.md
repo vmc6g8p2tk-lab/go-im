@@ -11,14 +11,14 @@
 
 ```powershell
 pwsh -File scripts/init-env.ps1
-docker compose --env-file .env -f deployments/compose.yaml up --build -d
-docker compose --env-file .env -f deployments/compose.yaml ps
-Invoke-RestMethod http://localhost:8080/healthz
+pwsh -File scripts/verify-compose.ps1
 ```
 
 `init-env.ps1` 生成随机开发密钥；已有 `.env` 时只补缺失的 Grafana 密码。该文件已被 Git 忽略。PostgreSQL 数据保存在 Compose volume 中。迁移容器先执行 `migrations/*.sql`，成功后应用才启动；不要手动修改生产表结构。停止服务用 `docker compose --env-file .env -f deployments/compose.yaml down`，此命令保留数据卷。
 
 若 5432/8080 已被占用，需调整 Compose 端口映射；若改动数据库密码但复用旧 volume，旧数据库密码不会自动变化。测试环境可先明确备份后清理 volume 再初始化。
+
+`verify-compose.ps1` 会检查 Compose 配置、启动服务、等待 HTTP/指标/Prometheus/Grafana 就绪并核查 Kafka Topic；加 `-Multi` 会启用第二个 IM 实例。脚本不会删除数据卷。本机没有 Docker，脚本只做了 PowerShell 语法检查，运行步骤仍待有 Docker 的环境实测。
 
 ## 接口快速体验
 
