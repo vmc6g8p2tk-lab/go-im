@@ -5,7 +5,7 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/example/go-im/internal/ratelimit"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/ratelimit"
 )
 
 func LimitIP(limiter *ratelimit.Limiter, next http.HandlerFunc) http.HandlerFunc {

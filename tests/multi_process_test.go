@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/example/go-im/internal/presence"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/presence"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 

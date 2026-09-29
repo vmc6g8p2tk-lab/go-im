@@ -1,4 +1,4 @@
-module github.com/example/go-im
+module github.com/VMC6G8P2TK-Lab/go-im
 
 go 1.26.0
 

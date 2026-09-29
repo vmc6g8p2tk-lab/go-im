@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/example/go-im/internal/metrics"
-	"github.com/example/go-im/internal/repository"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/metrics"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/repository"
 	kafka "github.com/segmentio/kafka-go"
 )
 

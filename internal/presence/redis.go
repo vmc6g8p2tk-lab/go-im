@@ -3,7 +3,7 @@ package presence
 import (
 	"context"
 	"fmt"
-	"github.com/example/go-im/internal/metrics"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/metrics"
 	"strconv"
 	"time"
 

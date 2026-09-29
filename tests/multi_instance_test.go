@@ -10,11 +10,11 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/example/go-im/internal/auth"
-	"github.com/example/go-im/internal/presence"
-	"github.com/example/go-im/internal/repository"
-	"github.com/example/go-im/internal/service"
-	imws "github.com/example/go-im/internal/websocket"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/auth"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/presence"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/repository"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/service"
+	imws "github.com/VMC6G8P2TK-Lab/go-im/internal/websocket"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 

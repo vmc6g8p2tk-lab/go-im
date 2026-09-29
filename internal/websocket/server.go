@@ -12,13 +12,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/example/go-im/internal/auth"
-	"github.com/example/go-im/internal/metrics"
-	"github.com/example/go-im/internal/model"
-	"github.com/example/go-im/internal/presence"
-	"github.com/example/go-im/internal/ratelimit"
-	"github.com/example/go-im/internal/repository"
-	"github.com/example/go-im/internal/service"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/auth"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/metrics"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/model"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/presence"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/ratelimit"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/repository"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/service"
 	ws "github.com/gorilla/websocket"
 )
 

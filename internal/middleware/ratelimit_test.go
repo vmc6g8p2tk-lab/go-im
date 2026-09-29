@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/example/go-im/internal/ratelimit"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/ratelimit"
 )
 
 func TestLimitIPIgnoresUntrustedForwardedFor(t *testing.T) {

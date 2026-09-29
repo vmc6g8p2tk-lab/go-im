@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/example/go-im/internal/auth"
-	"github.com/example/go-im/internal/presence"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/auth"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/presence"
 	ws "github.com/gorilla/websocket"
 )
 

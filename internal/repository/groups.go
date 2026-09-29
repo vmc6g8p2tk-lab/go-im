@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/example/go-im/internal/model"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/model"
 	"github.com/jackc/pgx/v5"
 )
 

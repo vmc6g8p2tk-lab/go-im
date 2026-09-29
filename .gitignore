@@ -1,5 +1,28 @@
 .env
+.env.*
+!.env.example
 *.log
+logs/
 coverage.out
 bin/
 *.exe
+*.test
+*.out
+*.pprof
+!benchmarks/profiles/fullstack-before-batch/*.pprof
+
+# Local benchmark output; reviewed evidence under benchmarks/results stays tracked.
+/result.json
+/benchmark-*.json
+/benchmarks/tmp/
+/benchmarks/results/tmp/
+/benchmarks/results/*-scratch.*
+
+# Editors and operating system files.
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+Desktop.ini

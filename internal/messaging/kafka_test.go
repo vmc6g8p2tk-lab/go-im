@@ -3,7 +3,7 @@ package messaging
 import (
 	"testing"
 
-	"github.com/example/go-im/internal/repository"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/repository"
 )
 
 func TestValidEventTargets(t *testing.T) {

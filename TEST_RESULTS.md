@@ -24,7 +24,7 @@
 | 连接释放 | `Hub.CloseAll` 后客户端连接关闭，连接从 Hub 删除；此单元测试连续 20 次通过 |
 | Origin 限制 | 不在白名单中的浏览器 Origin 被拒绝 |
 
-最后一次全量测试的端到端部分输出：
+当时全量测试的端到端部分输出（模块路径已从历史日志中省略；耗时为当时的实测值）：
 
 ```text
 === RUN   TestTwoUsersWebSocketAndPersistence
@@ -32,7 +32,7 @@
 === RUN   TestConcurrentBidirectionalDelivery
 --- PASS: TestConcurrentBidirectionalDelivery (0.33s)
 PASS
-ok  github.com/example/go-im/tests  1.097s
+ok  <当时模块路径>/tests  1.097s
 ```
 
 最后一次独立数据库核查结果为 `users=18`、`messages=170`、`schema_migrations=3`；用户/消息数包含此前重复运行的测试数据，不代表吞吐或生产负载。

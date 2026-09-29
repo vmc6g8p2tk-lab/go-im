@@ -8,9 +8,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/example/go-im/internal/auth"
-	"github.com/example/go-im/internal/model"
-	"github.com/example/go-im/internal/repository"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/auth"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/model"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/repository"
 )
 
 var ErrInvalidInput = errors.New("invalid input")

@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/example/go-im/internal/auth"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/auth"
 )
 
 type userIDKey struct{}

@@ -10,9 +10,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/example/go-im/internal/middleware"
-	"github.com/example/go-im/internal/repository"
-	"github.com/example/go-im/internal/service"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/middleware"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/repository"
+	"github.com/VMC6G8P2TK-Lab/go-im/internal/service"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
