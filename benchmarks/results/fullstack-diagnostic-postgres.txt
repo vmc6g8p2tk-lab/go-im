@@ -1,0 +1,44 @@
+ wait_type | wait_event |        state        | count 
+-----------+------------+---------------------+-------
+ Client    | ClientRead | idle                |    18
+ LWLock    | WALWrite   | active              |     5
+ CPU       | -          | active              |     1
+ Client    | ClientRead | idle in transaction |     1
+ IO        | WalSync    | active              |     1
+(5 rows)
+
+                                                                         QUERY PLAN                                                                          
+-------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.28..0.58 rows=1 width=30) (actual time=0.102..0.103 rows=1 loops=1)
+   Buffers: shared hit=19
+   ->  LockRows  (cost=0.28..709.50 rows=2346 width=30) (actual time=0.102..0.102 rows=1 loops=1)
+         Buffers: shared hit=19
+         ->  Index Scan using message_outbox_pending_idx on message_outbox  (cost=0.28..686.04 rows=2346 width=30) (actual time=0.078..0.085 rows=3 loops=1)
+               Filter: (published_at IS NULL)
+               Buffers: shared hit=16
+ Planning:
+   Buffers: shared hit=75
+ Planning Time: 0.331 ms
+ Execution Time: 0.119 ms
+(11 rows)
+
+                                                                                 QUERY PLAN                                                                                 
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.28..0.81 rows=1 width=30) (actual time=0.040..0.040 rows=1 loops=1)
+   Buffers: shared hit=22
+   ->  LockRows  (cost=0.28..528.36 rows=994 width=30) (actual time=0.039..0.040 rows=1 loops=1)
+         Buffers: shared hit=22
+         ->  Index Scan using delivery_status_outbox_pending_idx on delivery_status_outbox  (cost=0.28..518.42 rows=994 width=30) (actual time=0.028..0.029 rows=3 loops=1)
+               Filter: (published_at IS NULL)
+               Buffers: shared hit=19
+ Planning:
+   Buffers: shared hit=43
+ Planning Time: 0.188 ms
+ Execution Time: 0.054 ms
+(11 rows)
+
+ message_backlog | status_backlog 
+-----------------+----------------
+            1947 |              8
+(1 row)
+

@@ -40,10 +40,14 @@
 
 PostgreSQL 负载窗口内 25 个连接以下、活跃连接采样最高 5；相邻约 11 秒样本间数据库提交事务 +16935、回滚 +123。`docker stats` 的 5 个负载窗口样本中 PostgreSQL CPU 平均 52.18%、最高 76.67%，Kafka 平均 36.14%、最高 90.64%，app1 平均 33.67%、最高 44.23%，app2 平均 11.36%、最高 12.57%。Docker CPU 100% 约对应一个逻辑 CPU；这些不是精确区间峰值。app1/app2 所有成功数据库操作的指标均值约 1.670/0.656 ms，仅为混合 SQL 的平均数，不是 Outbox SQL 的专属延迟。
 
-## 代码与 SQL 初查（待 pprof 交叉验证）
+## 代码、SQL 与完整栈 pprof
 
 - `RunPublisher` 和 `RunStatusPublisher` 各只有单条循环：`Begin → SELECT ... LIMIT 1 FOR UPDATE SKIP LOCKED → kafka.Writer.WriteMessages(单条) → UPDATE → Commit`。事务与行锁覆盖同步 Broker 确认；每条事件独立 DB 往返。空队列轮询等待 200 ms，出错等待 2 秒。
 - Producer 在每个进程中复用，`RequiredAcks=RequireAll`，`BatchTimeout=20 ms`；当前每次 `WriteMessages` 只传一条并同步等待。没有证据支持关闭 `RequireAll`，也不应为分数降低确认级别。
-- 消息与状态 Outbox 各有 `(created_at,message_id) WHERE published_at IS NULL` 部分索引。空队列时真 PostgreSQL `EXPLAIN (ANALYZE, BUFFERS)` 分别显示 `Index Scan`，执行时间 0.028 / 0.037 ms、shared hit=1；这是**空队列计划**，还需在有 backlog 时复核。未加载 `pg_stat_statements`，因此没有按 SQL 归因的历史 p95。
+- 消息与状态 Outbox 各有 `(created_at,message_id) WHERE published_at IS NULL` 部分索引。空队列时真 PostgreSQL `EXPLAIN (ANALYZE, BUFFERS)` 分别显示 `Index Scan`，执行时间 0.028 / 0.037 ms、shared hit=1。另一次同配置 500/s 诊断负载中，当待发布消息/状态为 1947/8 时，索引仍命中，执行时间 0.119/0.054 ms。采样瞬间 `pg_stat_activity` 为 18 idle、5 active WALWrite、1 active WalSync、1 active CPU、1 idle in transaction。参见[原始 SQL 与状态](benchmarks/results/fullstack-diagnostic-postgres.txt)。未加载 `pg_stat_statements`，因此没有按 SQL 归因的历史 p95。
 
-当前证据支持发布端处理速率不足；具体是同步 Kafka 等待、长事务、单条往返中的哪一段，仍需完整栈 pprof 和有积压时的 SQL 观察后确定。此时不改可靠性路径。
+完整栈 pprof 通过 `PPROF_ADDR=127.0.0.1:6060` 在两个真实容器内采集；Block/Mutex 采样仅在本次剖析启动，常规压测关闭。15 秒、500/s 剖析负载从 20:15:46.522 至 20:16:04.670；100 条连接于 20:15:46.640 建好，两实例 CPU profile 从 20:15:46.681 至 20:15:55.012，**在发送窗口内**。CPU、heap、goroutine、block、mutex 均为本次完整 Compose，而非此前 Windows 非容器剖析。这个剖析负载时长不同于 Baseline，不能直接比较吞吐。两实例 CPU 样本 app1 1.70 CPU 秒、app2 0.71 CPU 秒；app1 中 `linux.Syscall6` 0.56 秒、`runtime.futex` 0.32 秒，`pgx.Conn.Query` 累计 0.30 秒，Outbox 发布调用路径 CPU 约 0.02 秒。Heap 样本 app1 in-use 约 13.7 MiB；goroutine 快照 app1 约 242、app2 约 42，以 WS read/write goroutine 为主。JSON 编码和应用锁均不是显著 CPU 热点。
+
+为避免 Block profile 中自进程启动以来的累计等待误导，另一次相同 500/s 诊断负载在发送中采集相隔 4.24 秒的 Block 和 Mutex 快照，计算 pprof diff。`RunPublisher → PublishNext → Kafka.Publish → kafka.Writer.WriteMessages → runtime.selectgo` 累计阻塞 **3.56 秒**；相同状态发布路径阻塞 **3.74 秒**。两个各自串行的发布循环在此窗口几乎都在等待同步 Producer。Mutex profile diff 总量只有约 **16.13 ms**，发布路径占比不足 1 ms。Goroutine 快照确有每类 Outbox 各一条发布 goroutine。诊断负载 4998 条、发送窗口首次送达约 202.49/s、P95 6867.9 ms、工具失败 0；参见[诊断负载](benchmarks/results/fullstack-diagnostic-500-load.json)、[采样时刻](benchmarks/results/fullstack-diagnostic-times.txt)。二进制 pprof 原始文件留在本机 `work` 目录，不把不稳定的构建路径归档进 Git。
+
+**结论：主要瓶颈是每条 Outbox 事件单独同步 Kafka `WriteMessages`，两个实例各自每种 Outbox 只有一条串行发布循环；事务同时横跨 Broker 确认，造成逐条数据库往返和长事务。** Kafka 消费 lag 在负载期间逐秒为 0，Outbox 索引扫描亚毫秒且 PostgreSQL CPU 未饱和，故不先调 Consumer、索引或连接池。下一步仅把一次锁定、写 Kafka、标记已发布扩展为小批次；仍使用 `RequireAll`，仍在 Broker 确认后更新 Outbox，保留至少一次投递与崩溃后可能重复的语义。
