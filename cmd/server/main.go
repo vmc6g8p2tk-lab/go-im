@@ -11,6 +11,7 @@ import (
 	"net/http/pprof"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -153,6 +154,11 @@ func run() error {
 		host, _, err := net.SplitHostPort(address)
 		if err != nil || host != "127.0.0.1" && host != "localhost" && host != "::1" {
 			return errors.New("PPROF_ADDR must be a loopback host:port")
+		}
+		// Contention sampling is diagnostic-only and opt-in because it adds overhead.
+		if os.Getenv("PPROF_CONTENTION") == "1" {
+			runtime.SetBlockProfileRate(1_000_000) // Sample one blocked event per millisecond.
+			runtime.SetMutexProfileFraction(5)
 		}
 		profileMux := http.NewServeMux()
 		profileMux.HandleFunc("/debug/pprof/", pprof.Index)
