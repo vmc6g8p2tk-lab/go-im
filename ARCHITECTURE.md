@@ -2,7 +2,7 @@
 
 ## 1. 系统目标
 
-这是一个供校招/实习技术面试展示、可逐阶段扩展并可真实压测的即时通信项目。第一阶段先验证从身份认证、WebSocket 收发到 PostgreSQL 持久化及历史查询的完整链路。所有性能结论必须附真实环境、方法和原始测试结果；目前不声明任何吞吐量或延迟指标。
+这是一个供校招/实习技术面试展示、可逐阶段扩展并可真实压测的即时通信项目。第一阶段先验证从身份认证、WebSocket 收发到 PostgreSQL 持久化及历史查询的完整链路。所有性能结论必须附真实环境、方法和原始测试结果；当前实测结果与限制见 [BENCHMARK.md](BENCHMARK.md)，不声明稳态最大吞吐。
 
 ## 2. 第一阶段架构
 
@@ -20,12 +20,12 @@ WebSocket 客户端 ── 认证/单聊 ──────┘    │
 ```text
 客户端 → 负载均衡 → 多个 Go 网关/业务实例 → PostgreSQL
                               │       │
-                              │       ├─ Redis：在线路由、限流、热点数据
+                              │       ├─ Redis：当前为在线实例提示；定向路由、全局限流、热点数据是后续方案
                               └─ Kafka：跨实例投递和异步事件
 Prometheus ← 指标端点；Grafana ← Prometheus
 ```
 
-幂等键、ACK、数据库重试、Kafka outbox、百人群聊、限流与指标端点已进入代码。本机回环负载和 pprof 测试见 [BENCHMARK.md](BENCHMARK.md)；真实 Kafka/Prometheus/Grafana 容器还未运行，不能仅凭代码和模拟测试宣称跨实例 Broker 或监控面板链路已验证。
+幂等键、ACK、数据库重试、Kafka outbox、百人群聊、限流与指标端点已进入代码。真实 Docker Compose、Kafka 双实例消息与 ACK、Prometheus/Grafana API 已在本机运行验证；完整栈性能测试发现秒级尾延迟与 Outbox 积压，见 [FINAL_VALIDATION.md](FINAL_VALIDATION.md)。当前没有独立的负载均衡器，测试客户端分别连接 8080/8081。
 
 ## 4. 组件职责与目录
 
@@ -40,14 +40,14 @@ Prometheus ← 指标端点；Grafana ← Prometheus
 | `internal/middleware` | HTTP Bearer JWT 鉴权 |
 | `internal/websocket` | 连接认证、读写循环、进程内 Hub |
 | `internal/auth` | 密码散列与 JWT 签发/验证 |
-| `internal/presence` | Redis 在线实例路由与过期过滤（可选） |
+| `internal/presence` | Redis 在线实例提示、心跳续期与过期过滤（可选）；当前投递路径未查询它 |
 | `internal/messaging` | Kafka outbox 发布与每实例消费组 |
 | `internal/metrics` | Prometheus 指标注册、数据库查询追踪与 `/metrics` |
 | `migrations` | 纳入 Git 的有序 SQL 迁移 |
 | `deployments` | Docker Compose 与容器镜像 |
 | `tests` | 从外部调用真实服务的集成验证 |
 
-Redis 在线路由和 Kafka 发布/消费代码可选接入；监控指标已接入 Go 服务，Prometheus/Grafana 容器尚未实测。消息的唯一真相仍在 PostgreSQL。
+Redis Presence 和 Kafka 发布/消费已在 Compose 实测；Prometheus 抓取 app1、Grafana 数据源代理查询已通过。Redis 提供在线实例提示，**未参与当前 Kafka 投递选路**。消息的唯一真相仍在 PostgreSQL。
 
 ### 可观测性边界
 
@@ -133,7 +133,7 @@ Redis 在线路由和 Kafka 发布/消费代码可选接入；监控指标已接
 
 当前单服务器重试循环按在线用户串行查询，规模化前需用真实压测评估数据库扫描成本；多实例下还要验证跨实例领取与投递路由。没有客户端 ACK 的旧用户会持续保留 `created`，这是兼容期的明确限制。
 
-### Kafka 异步投递与事务 outbox（已实现代码，真实 Broker 未验证）
+### Kafka 异步投递与事务 outbox（真实 Broker 已验证稳定路径）
 
 新消息插入时，PostgreSQL 触发器在同一事务写入 `message_outbox(message_id, recipient_id, created_at, published_at)`；回滚时两行一起回滚。每个实例的发布循环通过 `FOR UPDATE SKIP LOCKED` 领取未发布事件，Kafka 同步写入确认后才设置 `published_at` 并提交。失败则回滚，事件留待重试。进程若在 Kafka 确认后、数据库提交前崩溃，事件可能重复发布。Kafka 不提供整个 PostgreSQL + WebSocket 业务的 exactly once。
 
@@ -141,7 +141,7 @@ Topic `im.message.created.v1` 使用接收者 ID 作为 Partition Key。同一�
 
 配置 `KAFKA_BROKERS` 后，新消息不再直接投递本地接收连接，而是由 Kafka 消费链路投递；发送方的 `server_ack` 仍在数据库写入后立刻返回。Kafka 不可用时消息与 outbox 留在 PostgreSQL；在线接收者可被现有数据库重试循环补发，离线接收者下次连接同步。Kafka 消费重放可能生成重复 WebSocket 帧，但不能新建第二条逻辑消息；接收方应按 `message.id` 去重、重复 ACK。
 
-接收方 ACK 把 `messages.delivery_status` 从 `created` 改为 `delivered` 时，数据库触发器在同一事务创建 `delivery_status_outbox` 行。独立发布循环将 `{message_id,sender_id,status}` 写入相同 Topic，以 `u:{sender_id}` 为 Partition Key；各实例消费后按消息 ID 重新核验数据库状态，只通知本实例的发送者连接。Kafka 模式下 ACK 实例不再直接发本地 `message.status`，避免正常路径双发。发布失败保留 outbox；Kafka 接受后、数据库提交前崩溃仍可能重复通知，客户端按消息 ID 去重。未配置 Kafka 时保留单实例本地通知。这个路径已通过真实 PostgreSQL 加模拟消费边界测试，真实 Broker 链路仍待验证。
+接收方 ACK 把 `messages.delivery_status` 从 `created` 改为 `delivered` 时，数据库触发器在同一事务创建 `delivery_status_outbox` 行。独立发布循环将 `{message_id,sender_id,status}` 写入相同 Topic，以 `u:{sender_id}` 为 Partition Key；各实例消费后按消息 ID 重新核验数据库状态，只通知本实例的发送者连接。Kafka 模式下 ACK 实例不再直接发本地 `message.status`，避免正常路径双发。发布失败保留 outbox；Kafka 接受后、数据库提交前崩溃仍可能重复通知，客户端按消息 ID 去重。未配置 Kafka 时保留单实例本地通知。这个路径已在真实 PostgreSQL 和真实 Kafka Broker 上通过跨实例测试；app2 重启后的重平衡窗口曾先走数据库补发，见故障记录。
 
 ### 基础群聊（最多 100 人）
 
@@ -175,9 +175,9 @@ WebSocket `group.send` 入库后返回 `server_ack`；Kafka 未配置时只向�
 - 环境变量提供连接串、JWT 密钥、监听地址和允许的 WebSocket Origin。密钥不进入仓库；`.env.example` 仅给占位符。
 - 使用 SQL 迁移文件和独立迁移命令。数据库约束与服务层校验同时存在。
 - bcrypt 是方便验证的安全起点，但计算成本会影响登录吞吐；未来根据压测及安全要求评估 Argon2id。
-- Hub 只管理本实例连接；Kafka 每实例独立消费组负责跨实例事件传播，数据库补发为恢复路径。双进程数据库补发已验证，真实 Kafka 跨实例链路尚未验证。
+- Hub 只管理本实例连接；Kafka 每实例独立消费组负责跨实例事件传播，数据库补发为恢复路径。真实双实例 Kafka 单聊与 ACK 已验证；消费组重平衡期间可能退回数据库补发。
 - 可选 `PPROF_ADDR` 仅允许回环地址，在与业务端口分开的 HTTP 服务上暴露 CPU、Heap、Goroutine Profile；负载工具另在 `cmd/loadtest`。WebSocket 升级使用共享写缓冲池与 1 KiB 读写缓冲，8 KiB 帧限制仍单独生效；较大帧可能增加读取次数。
-- Redis 在线路由可通过 `REDIS_ADDR` 启用；Compose 现包含 Redis，但尚未在本机实际验证容器启动。
+- Redis Presence 可通过 `REDIS_ADDR` 启用；Compose 中真 Redis 的 Key、TTL、心跳续期和故障降级已验证，但当前投递不使用 Redis 定向选路。
 - 注册与登录在进程内按直接连接 IP 令牌桶限流（每秒补 2 个、突发 100 个）；WebSocket 文本发送按连接及用户分别每秒补 100 个、突发 200 个。`X-Forwarded-For` 未经可信代理验证时不参与身份判定。此限制只在单进程生效，多实例累计配额会放大，需在网关或 Redis 实现全局限流。JSON 请求/帧与 WebSocket 帧大小均受限；身份始终取 JWT，不信任客户端提供的 `sender_id`。
 
 ## 11. 后续扩展方案

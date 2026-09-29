@@ -1,72 +1,72 @@
-# Go IM V1.0 最终真实环境验收记录
+# Go IM V1.0 最终真实环境验收
 
-记录日期：2026-09-29（Asia/Shanghai）。本文件按实际执行的证据区分状态；**V1.0 尚不能宣称完成全部真实环境验收或封版**。与历史记录对应的原始压测汇总见 [BENCHMARK.md](BENCHMARK.md)，端到端功能和故障测试见 [TEST_RESULTS.md](TEST_RESULTS.md)、[FAILURE_TEST.md](FAILURE_TEST.md)。
+日期：2026-09-29（Asia/Shanghai）。本次从此前 Docker Engine 不可用的断点继续，在**实际 Docker Desktop Engine** 上执行。结论：**暂不封版，不打 `v1.0.0` tag，不把现有压测数字写成稳态最大吞吐。** 现有功能可在本机 Compose 中演示，但高负载延迟、Outbox 积压和 Redis 路由的功能边界需要明确处理。原始负载 JSON 见 [BENCHMARK.md](BENCHMARK.md)，故障过程见 [FAILURE_TEST.md](FAILURE_TEST.md)。
 
-## 【真实验证通过】
+## 验收状态分类
 
-| 能力 | 实际证据与范围 |
-| --- | --- |
-| 注册、登录、bcrypt、JWT、单聊、群聊、历史查询 | 本机真实 Go 服务 + PostgreSQL 18.3 的 HTTP/WebSocket 端到端测试通过；群聊成员权限及 100 人上限测试通过。 |
-| 消息持久化、幂等、ACK、离线补发 | 测试直接查询真实 PostgreSQL；相同客户端 UUID 只产生一条逻辑消息，断线重连同步未确认消息，ACK 后状态持久化。 |
-| Transactional Outbox | 真实 PostgreSQL 事务、触发器和待发布状态核查通过；发布失败及重试使用注入函数，不等于真实 Kafka Broker 验收。 |
-| 双进程数据库补发 | 两个真实 OS 进程、真实 PostgreSQL；一个实例退出后重新连接另一个实例，接收者获得未确认消息。该路径未启用 Kafka。 |
-| 限流、背压、资源释放 | 对应单元和真实 WebSocket 测试通过；100 连接、70 秒心跳测试后，`/metrics` 显示连接与发送队列 Gauge 均为 0。 |
-| Race Detector | Windows 10 Pro 22H2 + Go 1.27.1 + MSYS2 UCRT GCC 16.2.0，`CGO_ENABLED=1 go test -race -count=1 ./...` 退出码 0；`tests` 包使用真实 PostgreSQL 与本地服务，耗时 26.511 秒。真实 Kafka 双实例测试因环境变量未设置而跳过。 |
-| 静态检查 | `go vet ./...` 退出码 0；Git 仓库未跟踪 `.env`、可执行文件、pprof 或日志；未发现提交的实际 JWT 密钥、数据库密码或本机绝对路径。 |
-| 本机回环 5000 WebSocket 连接 | 5000/5000 建连、499/499 首次送达、0 工具计数失败、0 非预期断连；50 条/秒目标速率、10 秒、50 用户、单个非容器 Go 服务和本机 PostgreSQL，Redis/Kafka 未启用。此结果不能外推到完整 Compose 栈。 |
-| 现有 pprof 样本 | 在 500 连接、300 条/秒、20 秒负载期间采集 10 秒 CPU、Heap、Goroutine Profile；CPU 样本 `runtime.cgocall` 70.18% flat，累计栈指向 Windows `WSASend`；1011 个 goroutine 中约 1000 个为读写循环。 |
+### 【真实验证通过】
 
-## 【代码已实现但未完全验证】
+Docker Engine/Compose 完整启动、真 Redis Presence Key/TTL/心跳/自然过期与停机降级、真 Kafka Broker/Topic/两组消费与重启恢复、双实例跨 Kafka 单聊和 ACK、Prometheus 抓取 app1、Grafana 数据源查询、全套 race detector、完整栈低消息率 5000 与 10000 连接均已按下文条件实测。
 
-| 能力 | 当前状态与缺少的证据 |
-| --- | --- |
-| Redis 在线路由 | `miniredis` 模拟器测试通过；真实 Redis Key、Value、TTL、心跳续期、断线删除、实例强杀后的过期和真实 Redis 不可用场景均未执行。**真实 Redis：未通过验收（未运行）。** |
-| Kafka 发布/消费 | 代码、Outbox 和模拟消费边界测试通过；真实 Topic、Producer、Consumer Group、Partition Key、Broker 重启、重复事件和消费失败未测试。**真实 Kafka Broker：未通过验收（未运行）。** |
-| 双实例跨 Kafka 聊天与 ACK 状态传播 | 有专门的 `TestRealKafkaCrossInstanceDeliveryAndStatus`，但缺少两个已启动的 Kafka 实例；当前只能说明双进程 PostgreSQL 补发路径通过。**双实例跨 Kafka：未通过验收（未运行）。** |
-| Docker Compose | 安装了 Docker Desktop CLI 29.8.1、Compose v5.5.1，9 服务的 `config --quiet` 退出码 0；实际执行 `up --build -d` 和 `ps` 均退出码 1，报 Engine 命名管道不存在。没有容器日志。**Compose：未通过验收。** |
-| Prometheus / Grafana | Go `/metrics` 真实响应、面板 JSON 和抓取配置已检查；Prometheus 容器抓取、Grafana 数据源/面板和截图未实际运行。**两者真实容器验收：未通过。** |
-| 故障恢复 | PostgreSQL TCP 代理断连、模拟 Redis 不可用、模拟 Kafka 发布失败、双进程强杀和客户端重连已测试；真实 PostgreSQL/Redis/Kafka 容器重启、Kafka lag、路由残留、Broker 恢复与消费组重平衡尚未测试。 |
+### 【代码已实现但未完全验证】
 
-## 【未实现】
+群聊真 Kafka 大群扇出、10000 连接长时间或高消息率稳定性、完整栈消息最大稳态吞吐、在线客户端收到 Kafka 重复事件后的去重、多实例监控聚合及真实 PostgreSQL 容器宕机恢复均未完成对应验收。500 条/秒目标已经导致明显积压，不能把窗口内 208.09 条/秒称作最大稳定吞吐。
 
-- 生产环境 TLS/WSS、JWT 主动吊销和独立密钥托管未实现；当前配置面向本机开发环境。
-- 群消息逐成员 ACK 未实现；离线群消息通过历史 API 查询。
-- 跨主机和多区域部署没有实现或验收。不能把本机双进程测试描述为生产分布式集群。
+### 【未实现】
 
-## 【环境限制】
+Redis 定向投递选路、生产级 TLS/WSS、JWT 主动吊销、PostgreSQL/Kafka/Redis 高可用集群、跨主机分布式部署、群逐成员 ACK 均不在当前实现内。Redis Presence Key 存在不等于实现 Redis Routing。
 
-- Windows 10 Pro 22H2（build 19045）、Intel Core i7-13700KF（24 逻辑处理器）、物理内存约 31.82 GiB。检查时可用内存约 15.85 GiB、C: 剩余约 127.6 GiB。
-- 已通过系统命令启用 `Microsoft-Windows-Subsystem-Linux` 和 `VirtualMachinePlatform`，并安装 Microsoft 签名的 WSL 2.7.14.0；Windows 仍报告重启待完成。**必须由用户手动重启，不能把已启用功能当成已运行的 WSL2。**重启后还需确认硬件虚拟化可用。
-- 已安装 Docker Desktop 当前用户版本，但尚未启动 Engine；首次打开需要用户在 GUI 中阅读并接受 Docker Desktop 协议。CLI 可用不表示容器运行。
-- 当前本机另有 PostgreSQL 18.3 测试进程监听 `127.0.0.1:15432`、Go 服务监听 `127.0.0.1:18080`；Compose 默认端口为 PostgreSQL 5432、应用 8080/8081，不冲突。
-- 没有 GitHub 用户名或仓库 URL，`go.mod` 仍为 `github.com/example/go-im`；仓库尚无 remote。不能猜测实际模块路径，也未推送或创建 GitHub Release。
+### 【环境限制】
 
-## 性能结论及禁止外推的边界
+本轮只在单台 Windows 主机的 Docker Desktop/WSL2 中运行，Kafka 单 Broker 单副本。首次 10000 连接尝试被 Windows 临时端口占用打断，端口回收后重试通过；未在独立压测机或跨主机网络复验。完整栈 CPU/RSS 指标仅采样 app1，不能代表整栈资源。项目尚无 GitHub remote 或实际模块路径。
 
-| 指标 | 本次确有的结果 | 完整 Redis/Kafka/Compose 环境 |
+## 环境与启动证据
+
+- `docker version`：Client / Server 均为 29.8.1，`desktop-linux` Engine 已连接；`docker compose version`：v5.5.1；`docker info`：Linux/WSL2、24 CPU、Docker 可用内存 15.52 GiB。宿主机 Windows 10 Pro 22H2、i7-13700KF、物理内存约 31.82 GiB。
+- 实际执行 `docker compose --env-file .env -f deployments/compose.yaml --profile multi up --build -d` 成功。`app`、`app2`、PostgreSQL 17、Redis 8、Kafka 4.3.1、Prometheus 3.15.0、Grafana 13.2.2 均运行；PostgreSQL/Redis/Kafka 报 healthy；迁移和 Topic 初始化容器退出码 0。PostgreSQL 实际有 27 条迁移记录。
+- 两台 IM 的 `/healthz`、`app1 /metrics`、Prometheus `/-/ready`、Grafana `/api/health` 均 HTTP 200。容器内 `redis-cli PING` 得到 `PONG`。Kafka Topic `im.message.created.v1` 为 8 分区、单副本；两组 `im-delivery-app1` 和 `im-delivery-app2` 实际加入并消费，事后 offset/lag 检查为 0。
+
+## 真实功能验收
+
+| 项目 | 实际结果 | 判定 |
 | --- | --- | --- |
-| 最大已实测稳定连接组 | 5000/5000，50 条/秒，10 秒；不能称为连接上限 | 未测 |
-| 10000 连接 | 未测 | 未测 |
-| 稳定消息吞吐极限 | 未测；现有各连接组目标速率不同，pprof 负载的目标速率为 300 条/秒，不是吞吐极限测试 | 未测 |
-| 5000 连接组首次送达延迟 | P50 0.524 ms、P95 0.731 ms、P99 1.108 ms（原始实现单次）；最终缓冲配置同负载单次 P95 1.043 ms、P99 2.674 ms | 未测 |
-| 5000 连接组服务资源 | 原始实现 CPU 14.30%、峰值 RSS 246.6 MiB、峰值 goroutine 10012；仅计算 Go 服务，不含客户端和 PostgreSQL | 未测 |
-| 优化前后 | 同负载单次比较：RSS 246.6 → 234.3 MiB，P95 0.731 → 1.043 ms，P99 1.108 → 2.674 ms；只观察到内存与延迟的取舍 | 未重复验证 |
-| PostgreSQL / Redis / Kafka 状态 | PostgreSQL 真实落库核查通过；Redis 与 Kafka 真服务未运行，lag 未采集 | 未测 |
+| 注册、登录、bcrypt、JWT、双向 WebSocket、落库、历史、幂等、ACK、离线补发 | 本机真实 PostgreSQL 端到端与全套单元/集成测试已有通过记录；本次完整 Compose 上又运行跨实例集成测试，创建新用户和消息并直接查 PostgreSQL。 | 通过已测路径 |
+| 双实例跨 Kafka 消息与 ACK | `TestRealKafkaCrossInstanceDeliveryAndStatus`：A 连 app1、B 连 app2；A 获得 `server_ack`，B 获得 `message.new` 并 ACK，A 收到 `message.status=delivered`；库中状态 `delivered`、消息与状态 Outbox 已发布、`delivery_attempts=0`。Broker 恢复且消费组稳定后再次通过（0.48 秒）。 | 通过稳定状态路径 |
+| Redis 真服务与 Presence | 真 Redis `PING=PONG`；75 秒长连接测试时 `im:route:3/4` 含 `app1`，TTL 与时间分数随心跳更新；Redis 停止时两台 IM 发出 Presence 警告，但跨 Kafka 消息与 ACK 测试仍通过；Redis 重启恢复 healthy。 | Presence 写入/续期及降级通过；**Redis 未参与当前投递选路** |
+| Kafka Broker、重复事件 | 真 Topic、两组 Consumer Group 和分区 offset 已核查。向真 Broker 注入已投递消息 ID 的重复事件后，两实例 `im_kafka_consume_total{result="ok"}` 各增加 1；数据库该消息及 outbox 仍各 1 行、状态 delivered。 | 消费与数据库逻辑幂等通过；在线客户端重复帧仍需去重 |
+| Prometheus/Grafana | Prometheus Targets API 显示 `http://app:8080/metrics` 为 `up`、无抓取错误；Grafana 数据源指向真实 Prometheus，`Go IM Overview` Dashboard UID `go-im-overview` 有 10 面板；通过 Grafana 数据源代理实查 `im_websocket_connections` 得到成功结果。 | 实际服务与查询通过；未截取浏览器面板图片；默认只监控 app1 |
+| Race Detector / 静态检查 | Go 1.27.1 + MSYS2 GCC，在完整 Compose 环境设置两实例 URL 后，`CGO_ENABLED=1 go test -race -count=1 ./...` 退出码 0；另以 `-race -run TestRealKafkaCrossInstanceDeliveryAndStatus -v ./tests` 明确执行并通过（0.40 秒）；`go vet ./...`、`go mod verify` 通过。 | 已覆盖本次执行路径；没有长期并发安全保证 |
 
-这些数值来自 Windows 本机回环压测，连接数、用户数、目标发送速率和时长见 [BENCHMARK.md](BENCHMARK.md)。压测客户端与数据库资源未计入服务 CPU/RSS。不能把 49.9 条/秒的 5000 连接组或 pprof 负载的 300 条/秒目标速率写成系统最大吞吐。
+## 真实故障恢复
 
-## 恢复验收所需的实际步骤
+- 停止真 Redis 后，跨实例 Kafka 消息、接收方 ACK、发送方状态通知仍通过；重启 Redis 后服务 healthy。这验证聊天不依赖 Presence 可用性，不能声称 Redis 故障期间仍能精确查询在线路由。
+- 停止真 Kafka Broker 后，新增 `TestRealKafkaOutageDurableFallback` 实际通过：接收方通过 PostgreSQL 约 7 秒补发并 ACK，消息状态 delivered、`delivery_attempts=1`，消息/状态 Outbox 均为待发布。Broker 重启后同一消息两个 Outbox 均变为已发布，全库待发布数回到 0；Consumer Group 恢复。
+- 重启 app2 后，立即运行严格跨 Kafka 测试**失败一次**：消费组重平衡期间消息走数据库补发，`delivery_attempts=1`，未满足测试要求的纯 Kafka 快速链路。Broker 日志显示旧成员约 30 秒后超时、消费组稳定；稳定后重跑通过（0.48 秒）。这是实际恢复延迟，不隐去失败。
+- 另对 app2 执行 `stop -t 0`：真实 Redis `im:route:888` 在停止后仍含 `app2`，TTL 从 55/47 秒降至 5 秒，再到 `EXISTS=0`、`TTL=-2`；两条客户端连接按预期断开。app2 随后启动。此证据验证 TTL 自然清理，不代表离线状态瞬时准确。
+- app2 再启动后 `/healthz` 返回 200，`im-delivery-app2` 的 8 个分区事后 lag 均为 0；严格跨 Kafka 消息与 ACK 回归再次通过（0.32 秒）。
+- 既有 PostgreSQL TCP 代理断连与两进程强杀恢复测试见 [FAILURE_TEST.md](FAILURE_TEST.md)；本轮没有实际停止 PostgreSQL 容器，也没有验证数据库主从切换。
 
-1. 用户手动重启 Windows。重启后运行 `wsl --version`，确认 WSL 版本；若 WSL2 初始化失败，检查 BIOS/UEFI 的硬件虚拟化设置。
-2. 用户打开 Docker Desktop，在首次启动界面阅读并接受协议，等 Engine 就绪。运行 `docker info` 与 `docker compose version`；仅 CLI 版本输出不足以通过验收。
-3. 在仓库根目录执行 `pwsh -File scripts/init-env.ps1`，再执行 `pwsh -File scripts/verify-compose.ps1 -Multi`。该脚本启动 PostgreSQL、Redis、Kafka、两台 IM 服务、Prometheus、Grafana，并检查 HTTP 健康与 Kafka Topic；随后保留 `docker compose --env-file .env -f deployments/compose.yaml --profile multi ps` 和关键 `logs` 的真实输出。
-4. 按 README 设置 `DATABASE_URL`、`INTEGRATION_BASE_URL=http://127.0.0.1:8080`、`INTEGRATION_SECOND_BASE_URL=http://127.0.0.1:8081`，运行 `go test -run TestRealKafkaCrossInstanceDeliveryAndStatus -v ./tests`。同时以 `redis-cli` 查实际路由 Key/TTL，以 Kafka CLI 查 Topic 与 Consumer Group，以 PostgreSQL 查消息、ACK、Outbox。
-5. 依次执行真实 Redis/Kafka/数据库重启及两台服务强杀恢复；记录日志、实际键值/TTL、lag、数据库最终状态和未预期断连。再在完整栈稳定后分级进行 1000/2000/5000/10000 连接测试和独立吞吐阶梯。每一级监视主机可用内存并在错误率、P99、lag 或资源明显恶化时停止。
+## 完整 Compose 性能与资源
 
-所有步骤必须更新本文件和 [FAILURE_TEST.md](FAILURE_TEST.md) 的真实结果；目前没有 Docker `ps`、容器日志或监控截图可以附上。
+客户端从 Windows 通过回环连 app1；app2 同时消费 Kafka 事件。CPU/RSS/goroutine 由 app1 `/metrics` 采样，**不包含**压测进程、app2、PostgreSQL、Redis、Kafka、Prometheus、Grafana。Docker Stats 在 500 条/秒档后显示 Kafka 约 973 MiB、PostgreSQL约 112 MiB；这些是单次事后快照，不是区间峰值。具体参数与原始 JSON 见 [BENCHMARK.md](BENCHMARK.md)。
 
-## GitHub 发布门槛
+| 负载 | 实测结果 | 限制 |
+| --- | --- | --- |
+| 100 条/秒目标、100 连接、15 秒 | 1499 发、1477 首次送达，窗口 81.40 条/秒，P95 3091 ms、P99 3197 ms，0 工具失败/断连。 | 已有秒级尾延迟；3 秒排空后仍少 22 条客户端首次送达。 |
+| 500 条/秒目标、100 连接、10 秒 | 4990 发、3115 首次送达，窗口 208.09 条/秒，P95 6880 ms、P99 7064 ms，470 重复帧，0 工具失败/断连。 | 测试后消息/状态 Outbox 待发布 2736/1062，后续排空；没有稳态。 |
+| 2000 连接、100 用户、5 条/秒、10 秒 | 2000/2000 建连，49/49 首次送达，0 断连，P95 214 ms，app1 峰值 RSS 102.8 MiB、4043 goroutine。 | 低速率连接测试；931 个额外设备帧。 |
+| 5000 连接、100 用户、5 条/秒、10 秒 | 5000/5000 建连，49/49 首次送达，0 断连，P95 213 ms，app1 峰值 RSS 208.1 MiB、10044 goroutine。 | 低速率连接测试；2401 个额外设备帧。 |
+| 首次 10000 连接尝试 | 第 9049 条由 Windows `connectex` 报本地 socket 地址/端口不可用，未进入发送窗口。 | 此前连续关闭 2000/5000 连接；不能归因于服务端上限。动态端口范围 49152–65535。退出后服务连接/队列 Gauge 均为 0。 |
+| 端口回收后单独重试 10000 连接 | 10000/10000 建连，49/49 首次送达，0 工具失败/意外断连，P95 215 ms、P99 231 ms，app1 峰值 RSS 364.4 MiB、20042 goroutine。 | 仅 100 用户、5 条/秒、10 秒发送窗口；4851 个额外设备帧，不能证明 10000 连接在高吞吐下稳定。退出后连接/队列 Gauge 均为 0、Outbox 为空。 |
 
-- Git 已跟踪 100 个文件，当前检查没有跟踪 `.env`、日志、pprof 或可执行文件，未发现实际密钥、数据库密码、本机绝对路径或超过 1 MiB 的已跟踪文件。`.env.example` 只含明确的占位值。
-- 用户提供 GitHub 用户名且仓库确定为 `github.com/<username>/go-im` 后，运行 `pwsh -File scripts/prepare-github-module.ps1 -GitHubUsername <username>`。该脚本只更新 `go.mod` 和 Go 源码导入路径；随后更新 README 中的占位说明，执行 `go mod tidy`、`go test ./...`、`go vet ./...`、`go test -race ./...`，检查 `git diff` 与远端 URL。
-- 在真实 Compose/Redis/Kafka/监控、故障和分级性能验收完成以前，不打 `v1.0.0` tag，不把 README 的代码能力写成全部生产链路已验证。
+100 条/秒档已出现明显延迟，500 条/秒档出现积压，故按停止条件不继续 1000/2000/5000 条/秒档。这里测到的是特定发送窗口的客户端首次送达率，不是系统最大吞吐。此前非容器、无 Redis/Kafka 的 5000 连接回环结果不能与完整栈混写。
+
+## 代码边界与封版判断
+
+1. Redis `im:route:<user>` 是可过期在线实例提示。**当前生产投递路径未调用 `RedisStore.Instances`**；Kafka 采用每实例独立消费组广播事件，本地 Hub 决定是否投递。将此版本称为“Redis 定向路由”会误导，README 和学习记录应按代码实际描述。
+2. 单节点 Kafka replication factor 1、单 PostgreSQL、单 Redis 只适合本机开发验证；没有跨主机、高可用与长期运行数据。Broker/实例重启可恢复，但消费组重平衡期间实时路径存在约 30 秒窗口。
+3. 高频负载的 Outbox 单条发布和状态事件成本已经在真栈产生积压；在无改动、无重复测量前不能给出稳态容量或简历上的“高并发吞吐量”。
+4. Prometheus 默认只抓 app1。10,000 连接首次尝试受本机端口资源限制，等待回收后低消息率重试通过；更长时间或高消息率尚未验证。群聊真 Kafka 大群、在线重复帧、长期泄漏、真实 PostgreSQL 容器宕机与跨主机网络未验收。
+5. `go.mod` 仍为 `github.com/example/go-im`，仓库没有 remote；待用户确定 GitHub 名称后再替换路径。`.env`、二进制、日志和 pprof 保持不入 Git。**本轮不新增业务功能，也不推进第二阶段。**
+
+因此 V1.0 可以作为**本机演示与学习里程碑**，但目前**不正式封版**。若要封版，需要先确定并记录目标门槛，再针对高负载积压、监控第二实例、Redis 路由定位以及 10,000 连接更长时间/更高消息率逐项补证；任何后续实现或性能改动都应由独立任务授权。

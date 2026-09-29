@@ -1,4 +1,4 @@
-# 第一阶段实际测试记录
+# 第一阶段及后续 V1.0 实际测试记录
 
 日期：2026-09-27（Asia/Shanghai）。以下仅记录执行过的检查；没有吞吐、P95/P99、CPU 或内存的压测数据。
 
@@ -142,3 +142,13 @@ ok  github.com/example/go-im/tests  1.097s
 本机随后安装 Docker Desktop 当前用户版与 Microsoft WSL 2.7.14.0；`docker compose --env-file .env -f deployments/compose.yaml --profile multi config --quiet` 退出码 0，列出 9 个服务。`docker info` 明确报 Docker Engine 命名管道不存在；Windows 功能启用后仍待用户重启并在 Docker Desktop GUI 接受协议。因此 `docker compose up/ps/logs`、真实 Redis/Kafka、Prometheus/Grafana 均尚未运行。本段取代上文各阶段“本机无 Docker CLI”的历史环境描述。
 
 实际执行 `docker compose --env-file .env -f deployments/compose.yaml --profile multi up --build -d` 和同配置的 `ps`，两者均以状态 1 退出，错误为 `failed to connect to the docker API at npipe:////./pipe/docker_engine`，命名管道不存在；没有任何容器被这两条命令启动。这是环境启动失败，不能算 Compose 验收通过。
+
+## V1.0 最终验收补充：真实 Docker Compose 栈（2026-09-29）
+
+用户重启并在 Docker Desktop 中启动 Engine 后，`docker version`、`docker compose version`、`docker info` 实际通过。完整 `--profile multi up --build -d` 成功，七个长期容器运行，PostgreSQL/Redis/Kafka healthy，迁移和 Kafka 初始化容器完成。迁移表为 27 条；两台 IM、Prometheus、Grafana 的 HTTP 健康端点均为 200。此段更新上文 Engine 不可用的历史状态。
+
+真实 `TestRealKafkaCrossInstanceDeliveryAndStatus` 在完整栈运行：A 连接 app1，B 连接 app2，消息经过 Kafka 到达 B，B ACK 后 A 收到 delivered 状态；消息与状态 Outbox 已发布，数据库 `delivery_attempts=0`。Redis `PING=PONG`，真实 Key 的实例成员、TTL 和续期已检查。Prometheus Targets API 对 app1 显示 up，Grafana 已加载真实数据源和 10 面板 Dashboard，经 Grafana API 查询 Prometheus 指标成功；app2 默认未被抓取。
+
+真实 Redis 停止时上述跨实例消息和 ACK 仍通过；Kafka 停止时新增 `TestRealKafkaOutageDurableFallback` 观察到 PostgreSQL 补发、ACK 和两个待发布 Outbox，Broker 恢复后 Outbox 均发布。重启 app2 后立即测试严格 Kafka 路径失败一次（数据库先补发），消费组稳定后再次通过。这些结果及重复 Kafka 事件注入的边界见 [FAILURE_TEST.md](FAILURE_TEST.md)。完整 Compose 性能原始 JSON 与停止升档理由见 [BENCHMARK.md](BENCHMARK.md)。当前封版判断见 [FINAL_VALIDATION.md](FINAL_VALIDATION.md)。
+
+完整 Compose 稳定后再次执行 `go test -count=1 ./...`，全部包通过（`tests` 15.784 秒）；使用本机 MSYS2 GCC 包装器执行 `CGO_ENABLED=1 go test -race -count=1 ./...`，全部包通过（`tests` 17.776 秒）；以 `-race -run TestRealKafkaCrossInstanceDeliveryAndStatus -count=1 -v ./tests` 单独核实该真 Broker 测试实际执行并通过（测试本身 0.40 秒）。`go vet ./...` 退出码 0，`go mod verify` 输出 `all modules verified`。仅 Broker 停机专用测试需要先停止真 Kafka 并设置 `INTEGRATION_KAFKA_OUTAGE=1`，正常全套测试中会跳过；其单独真实故障运行记录见 [FAILURE_TEST.md](FAILURE_TEST.md)。

@@ -2,13 +2,13 @@
 
 技术栈：**Go · WebSocket · PostgreSQL · Redis · Kafka · Prometheus · Grafana · Docker Compose**。
 
-核心能力：Reliable Messaging、Idempotency、ACK、Offline Delivery、Multi-instance Routing、Transactional Outbox、Backpressure、Rate Limiting、Metrics、Load Testing、Failure Recovery。
+核心能力：Reliable Messaging、Idempotency、ACK、Offline Delivery、Multi-instance Kafka Delivery、Transactional Outbox、Backpressure、Rate Limiting、Metrics、Load Testing、Failure Recovery。Redis 记录可过期的在线实例提示，当前投递路径由每实例 Kafka 消费组广播后交给本地 Hub，并未使用 Redis 定向选路。
 
-本项目按阶段构建可解释、可验证的即时通信系统。注册、登录、JWT、单聊、群聊、消息持久化、幂等、ACK 与离线补发已在本机真实 Go 服务和 PostgreSQL 上测试；双进程数据库补发路径已实测。Redis 在线实例路由、Kafka 跨实例事件、Prometheus 抓取和 Grafana 面板已有代码或部署配置，**真实容器链路尚未完成验收**。`go test -race -count=1 ./...` 已在 Windows + MSYS2 GCC 环境通过。本机回环负载测试见 [BENCHMARK.md](BENCHMARK.md)，不是线上容量承诺。逐项证据与剩余条件见 [FINAL_VALIDATION.md](FINAL_VALIDATION.md)。[架构设计](ARCHITECTURE.md)、[学习记录](LEARNING.md)、[故障测试](FAILURE_TEST.md)与 [50 道面试题](INTERVIEW.md)记录实现依据和边界。
+本项目按阶段构建可解释、可验证的即时通信系统。注册、登录、JWT、单聊、群聊、消息持久化、幂等、ACK 与离线补发已在真实 Go 服务和 PostgreSQL 上测试。Docker Compose 的两台 IM、Redis、Kafka、Prometheus、Grafana 已实际启动；跨 Kafka 消息与 ACK、Redis/Kafka 故障恢复、10000 低消息率连接均有真实测试记录。完整栈在 100–500 条/秒目标负载下出现秒级尾延迟和 Outbox 积压，因此 **V1.0 暂不封版**，也不宣称稳态最大吞吐。`go test -race -count=1 ./...` 已在 Windows + MSYS2 GCC 和完整 Compose 环境通过，真实 Kafka 双实例测试另以 `-race -v` 确认执行通过。原始压测见 [BENCHMARK.md](BENCHMARK.md)，逐项证据与剩余条件见 [FINAL_VALIDATION.md](FINAL_VALIDATION.md)。[架构设计](ARCHITECTURE.md)、[学习记录](LEARNING.md)、[故障测试](FAILURE_TEST.md)与 [50 道面试题](INTERVIEW.md)记录实现依据和边界。
 
 ## 技术栈与架构
 
-Go、HTTP REST、WebSocket、PostgreSQL、Redis、Kafka、Docker Compose、Prometheus、Grafana。数据库保存消息与 outbox 作为可靠状态；Redis 只保存可过期路由；Kafka 用于配置后的跨实例事件通知。下图是已编写代码与 Compose 对应的架构，**真实 Kafka/Redis 容器链路仍待验证**。
+Go、HTTP REST、WebSocket、PostgreSQL、Redis、Kafka、Docker Compose、Prometheus、Grafana。数据库保存消息与 outbox 作为可靠状态；Redis 保存可过期的在线实例提示；Kafka 用于跨实例事件通知。下图对应已在本机 Compose 中启动的组件；Prometheus 当前只抓 app1。
 
 ```mermaid
 flowchart LR
@@ -16,7 +16,7 @@ flowchart LR
     Client -->|HTTP + WebSocket| B[IM 实例 2]
     A <--> PG[(PostgreSQL 消息与 outbox)]
     B <--> PG
-    A <--> R[(Redis 在线路由)]
+    A <--> R[(Redis 在线提示)]
     B <--> R
     A <--> K[(Kafka 事件 Topic)]
     B <--> K
@@ -40,7 +40,7 @@ pwsh -File scripts/verify-compose.ps1 -Multi
 
 若 5432/8080 已被占用，需调整 Compose 端口映射；若改动数据库密码但复用旧 volume，旧数据库密码不会自动变化。测试环境可先明确备份后清理 volume 再初始化。
 
-`verify-compose.ps1` 会检查 Compose 配置、启动服务、等待 HTTP/指标/Prometheus/Grafana 就绪并核查 Kafka Topic；加 `-Multi` 会启用第二个 IM 实例。脚本不会删除数据卷。本机 Docker CLI 和 Compose 已安装，`docker compose config --quiet` 已通过，但 Engine 因 WSL 功能待重启尚未启动，脚本和容器仍待实测。
+`verify-compose.ps1` 会检查 Compose 配置、启动服务、等待 HTTP/指标/Prometheus/Grafana 就绪并核查 Kafka Topic；加 `-Multi` 会启用第二个 IM 实例。脚本不会删除数据卷。2026-09-29 已通过实际 `docker compose --env-file .env -f deployments/compose.yaml --profile multi up --build -d` 启动完整环境并核查服务、Topic、Redis、监控和跨实例链路；执行细节见 [FINAL_VALIDATION.md](FINAL_VALIDATION.md)。
 
 ## 接口快速体验
 
@@ -75,7 +75,7 @@ docker compose --env-file .env -f deployments/compose.yaml exec postgres psql -U
 
 `tests/e2e_test.go` 使用真实 HTTP、两个 WebSocket 连接和 PostgreSQL，验证双向消息、落库及历史查询。`INTEGRATION_SERVER_BINARY` 与 `INTEGRATION_JWT_SECRET` 还可启用双进程故障恢复测试。未设置所需环境变量时测试会明确跳过，不可将跳过写成通过。实际执行记录见 [TEST_RESULTS.md](TEST_RESULTS.md)。
 
-真实 Kafka 双实例链路可在 Compose 启动后设置 `INTEGRATION_SECOND_BASE_URL=http://localhost:8081`，并提供两个服务共用的 `DATABASE_URL` 与 `INTEGRATION_BASE_URL`，执行 `go test -run TestRealKafkaCrossInstanceDeliveryAndStatus -v ./tests`。当前 Engine 未运行，该测试只完成编写并在缺少环境变量时跳过。
+真实 Kafka 双实例链路可在 Compose 启动后设置 `INTEGRATION_SECOND_BASE_URL=http://localhost:8081`，并提供两个服务共用的 `DATABASE_URL` 与 `INTEGRATION_BASE_URL`，执行 `go test -run TestRealKafkaCrossInstanceDeliveryAndStatus -v ./tests`。此测试已在稳定的真实 Broker 上通过；app2 重启后立即运行时曾因消费组重平衡而走数据库补发，详情见 [FAILURE_TEST.md](FAILURE_TEST.md)。
 
 独立压测工具：
 
@@ -100,7 +100,7 @@ internal/migration     迁移执行器
 internal/messaging     Kafka outbox 发布与消费
 internal/metrics       Prometheus 指标与数据库查询追踪
 internal/model         数据结构
-internal/presence      Redis 在线实例路由
+internal/presence      Redis 在线实例提示与 TTL
 internal/repository    PostgreSQL SQL
 internal/service       业务规则
 internal/websocket     Hub、连接读写循环
@@ -113,11 +113,11 @@ tests                  真实服务端到端测试
 
 ## 已知边界
 
-- Hub 只管理本实例连接；Kafka 每实例独立消费组传播消息事件。PostgreSQL 中的未确认消息可由在线重试循环和重连同步补发。双进程数据库补发路径已测试；真实 Kafka 与真实 Redis 跨实例路径仍未验证。
-- 跨实例送达状态使用 PostgreSQL `delivery_status_outbox` 和 Kafka 事件通知发送者；已测真实数据库事务和模拟消费边界，真实 Broker 待验证。
+- Hub 只管理本实例连接；Kafka 每实例独立消费组传播消息事件，消费者向本地 Hub 投递。PostgreSQL 中的未确认消息可由在线重试循环和重连同步补发。真实跨 Kafka 消息与 ACK 路径已通过，但 Redis Presence 当前不参与定向投递。
+- 跨实例送达状态使用 PostgreSQL `delivery_status_outbox` 和 Kafka 事件通知发送者；真实 Broker 稳定状态路径和 Broker 停止后的数据库补发均已验证。
 - 已实现送达 ACK 和重试，但客户端仍需去重；旧客户端不传 ID 时重发仍可能重复写库。已读 ACK 尚未实现。
 - JWT 在到期前不可主动吊销；生产环境需要 TLS/WSS、密钥管理与限流。
 - `go.mod` 暂用 `github.com/example/go-im`，发布到你的 GitHub 仓库前应替换为实际仓库路径并更新 Go import。
 - 历史查询分页按数据库消息 ID，而非全局严格时间顺序。
 
-Kafka/outbox 代码可用 `KAFKA_BROKERS` 启用；未设置时沿用单实例即时投递。`docker compose --profile multi --env-file .env -f deployments/compose.yaml up --build -d` 配置第二个服务实例（8081）；当前 Docker Engine 未运行，Compose 及真实 Broker **未验证**。每实例独立消费组使 Kafka 读取成本随实例数增加。群离线消息目前通过历史 API 查询，尚无逐成员 ACK。正式本机回环压测已执行，但真实 Redis、Kafka 和 Compose 启动尚未在本机验证。
+Kafka/outbox 代码可用 `KAFKA_BROKERS` 启用；未设置时沿用单实例即时投递。`docker compose --profile multi --env-file .env -f deployments/compose.yaml up --build -d` 配置第二个服务实例（8081），已在本机 Docker Desktop 实际运行。每实例独立消费组使 Kafka 读取成本随实例数增加。群离线消息目前通过历史 API 查询，尚无逐成员 ACK。完整栈的性能边界和封版阻碍见 [FINAL_VALIDATION.md](FINAL_VALIDATION.md)。

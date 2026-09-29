@@ -1,0 +1,36 @@
+{
+  "base_url": "http://127.0.0.1:8081",
+  "started_at": "2026-09-29T19:54:36.9747174+08:00",
+  "duration_seconds": 75.0002887,
+  "connections_requested": 2,
+  "connections_succeeded": 2,
+  "connection_success_rate": 1,
+  "users": 2,
+  "target_rate_msg_per_sec": 1,
+  "sent": 37,
+  "server_ack": 37,
+  "unique_delivered": 37,
+  "delivered_during_send": 37,
+  "duplicate_frames": 0,
+  "additional_device_frames": 0,
+  "failures": 0,
+  "unexpected_disconnects": 2,
+  "delivered_msg_per_sec": 0.49333143433619875,
+  "latency_samples": 37,
+  "delivery_mean_ms": 110.1485108108108,
+  "delivery_p50_ms": 114.464,
+  "delivery_p95_ms": 201.1224,
+  "delivery_p99_ms": 207.79149999999998,
+  "server_ack_p95_ms": 5.2153,
+  "server_peak_rss_bytes": 39874560,
+  "server_peak_goroutines": 45,
+  "errors": {
+    "read_error": 2
+  },
+  "notes": [
+    "delivery latency measures immediately before client WriteJSON to first recipient message.new; repeat frames on the same socket are excluded",
+    "additional_device_frames counts first copies on other sockets of the same user",
+    "throughput counts first deliveries during the send interval divided by send duration; a 3-second drain contributes to unique_delivered but not throughput",
+    "CPU and RSS are server process metrics from /metrics when available; load generator and PostgreSQL are excluded"
+  ]
+}
