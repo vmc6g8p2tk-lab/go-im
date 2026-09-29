@@ -30,6 +30,10 @@ const (
 	writeTimeout  = 5 * time.Second
 )
 
+// Gorilla checks out a write buffer only while writing. Sharing one pool
+// avoids retaining a buffer for every mostly idle WebSocket connection.
+var writeBufferPool sync.Pool
+
 type Server struct {
 	Auth            *auth.Manager
 	Service         *service.Service
@@ -73,7 +77,9 @@ type incoming struct {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	upgrader := ws.Upgrader{CheckOrigin: func(r *http.Request) bool {
+	// Most control and text frames are small; a 1 KiB read buffer lowers idle
+	// connection memory while the 8 KiB ReadLimit still bounds payloads.
+	upgrader := ws.Upgrader{ReadBufferSize: 1024, WriteBufferSize: 1024, WriteBufferPool: &writeBufferPool, CheckOrigin: func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
 		if origin == "" { // Non-browser clients do not send Origin.
 			return true

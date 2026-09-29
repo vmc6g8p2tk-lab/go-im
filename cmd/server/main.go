@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -96,6 +98,7 @@ func run() error {
 		wsServer.AsyncDelivery = true
 	}
 	retryCtx, retryCancel := context.WithCancel(ctx)
+	defer retryCancel()
 	kafkaPublisherDone := make(chan struct{})
 	groupPublisherDone := make(chan struct{})
 	statusPublisherDone := make(chan struct{})
@@ -143,6 +146,32 @@ func run() error {
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	// Profiling is opt-in and listens only on loopback so profile data is not
+	// exposed through the public API or Docker port mapping.
+	var profileServer *http.Server
+	if address := os.Getenv("PPROF_ADDR"); address != "" {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil || host != "127.0.0.1" && host != "localhost" && host != "::1" {
+			return errors.New("PPROF_ADDR must be a loopback host:port")
+		}
+		profileMux := http.NewServeMux()
+		profileMux.HandleFunc("/debug/pprof/", pprof.Index)
+		profileMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		profileMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		profileMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		profileMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		profileServer = &http.Server{Addr: address, Handler: profileMux, ReadHeaderTimeout: 5 * time.Second}
+		profileListener, err := net.Listen("tcp", address)
+		if err != nil {
+			return err
+		}
+		defer profileListener.Close()
+		go func() {
+			if err := profileServer.Serve(profileListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("pprof server stopped", "error", err)
+			}
+		}()
+	}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.ListenAndServe() }()
 	slog.Info("server listening", "addr", config.Addr)
@@ -173,6 +202,11 @@ func run() error {
 	defer shutdownCancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		return err
+	}
+	if profileServer != nil {
+		if err := profileServer.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
 	}
 	return listenErr
 }
