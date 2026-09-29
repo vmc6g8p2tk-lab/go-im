@@ -4,7 +4,7 @@
 
 使用仓库内 `cmd/loadtest` 驱动真实 HTTP 注册/登录与 WebSocket 连接，按固定全局速率发送带 UUID 的单聊消息。接收端首次收到 `message.new` 后发 `delivery.ack`。发送端 `server_ack`、接收端首次送达、同一连接的重复帧、意外断连和错误分别计数。首次送达延迟从客户端**开始调用** `WriteJSON` 前的时间戳算到第一个接收端帧。P50/P95/P99 用排序样本的 nearest-rank 值；低于本机计时分辨率的样本可能显示 0 ms，不能理解成零网络延迟。吞吐只计发送窗口内首次送达的逻辑消息，3 秒排空期收到的消息仍计入总送达数，但不计入窗口吞吐。
 
-测试时间：2026-09-29（Asia/Shanghai）。测试机：Windows 10.0.19045、24 个逻辑处理器、Go 1.27.1、同机 PostgreSQL 18.3；客户端、服务端和数据库均在同一机器的 `127.0.0.1`。服务未启用 Redis、Kafka、Docker、Prometheus 或 Grafana。CPU%、RSS 和 goroutine 来自被测 Go 服务的 `/metrics`，**不包含压测客户端与 PostgreSQL 的资源占用**。CPU% 由服务进程 CPU 秒数变化量除以观测墙钟时间，100% 约为一个逻辑处理器满载。RSS 是观测窗口内定时采样峰值，不是精确瞬时最大值。连接建立、注册、登录不计入发送窗口。
+测试时间：2026-09-29（Asia/Shanghai）。测试机：Windows 10 Pro 22H2（build 19045）、Intel Core i7-13700KF（24 个逻辑处理器）、物理内存约 31.82 GiB、Go 1.27.1、同机 PostgreSQL 18.3；客户端、服务端和数据库均在同一机器的 `127.0.0.1`。服务未启用 Redis、Kafka、Docker、Prometheus 或 Grafana。CPU%、RSS 和 goroutine 来自被测 Go 服务的 `/metrics`，**不包含压测客户端与 PostgreSQL 的资源占用**。CPU% 由服务进程 CPU 秒数变化量除以观测墙钟时间，100% 约为一个逻辑处理器满载。RSS 是观测窗口内定时采样峰值，不是精确瞬时最大值。连接建立、注册、登录不计入发送窗口。
 
 同一用户可开多个连接，服务会把消息发到该用户的所有在线连接。`additional_device_frames` 是其他设备收到的首份副本，不能当作逻辑消息吞吐。下列 100–5000 连接组改变了用户数、目标速率或持续时间，**不能把各行差异当成单变量扩容曲线**。
 

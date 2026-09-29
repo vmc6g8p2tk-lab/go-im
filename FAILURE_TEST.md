@@ -12,4 +12,4 @@
 | 慢消费者 | `TestFullSendQueueClosesSlowConnectionOnce` 填满有界队列，连接被关闭，慢消费者计数只增加一次。测试通过。 | 人工固定满队列，未模拟真实慢公网链路。 |
 | 长连接心跳与资源释放 | 独立压测工具保持 100 条连接 70 秒，跨过两次 Ping 周期；349 条消息全部首次送达，0 意外断连。结束后实际抓取连接 Gauge 0、队列 Gauge 0、goroutine 11。 | 只覆盖 70 秒和本机回环，不是长期泄漏或半开公网连接测试。 |
 
-所有上述结果都依赖测试使用的真实 PostgreSQL 和对应进程；真实 Kafka/Redis 容器故障、跨主机网络断开、长期 goroutine 泄漏、数据库实例重启与故障切换仍**未验证**。`go test -race` 因本机缺少 `gcc` 无法构建，因此也没有 race detector 通过结论。
+所有上述结果都依赖测试使用的真实 PostgreSQL 和对应进程；真实 Kafka/Redis 容器故障、跨主机网络断开、长期 goroutine 泄漏、数据库实例重启与故障切换仍**未验证**。2026-09-29 安装 MSYS2 UCRT GCC 后，使用仅位于本机工作目录的编译器包装脚本补齐 DLL 搜索路径，`go test -race -count=1 ./...` 全部通过；这只覆盖该次测试实际执行到的并发路径。

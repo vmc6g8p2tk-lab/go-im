@@ -134,3 +134,11 @@ ok  github.com/example/go-im/tests  1.097s
 新增 `TestDatabaseConnectionOutageAndRecovery`：以 TCP 代理断开真实服务与 PostgreSQL 的网络连接，实际观察 `internal_error`、库中 0 行；恢复连接并复用 UUID 后，接收者收到消息、库中 1 行。目标测试通过。真实 PostgreSQL 进程宕机和主从恢复未验证。`TestRealKafkaCrossInstanceDeliveryAndStatus` 已编写，但当前无 Docker/真实 Broker，缺少 `INTEGRATION_SECOND_BASE_URL` 时明确跳过；**不能记为真实 Kafka 通过**。
 
 在最终 1 KiB 缓冲版本和真实 PostgreSQL 上重跑 `go test -count=1 ./...`，包含原有与新故障测试，全部通过；接下来仍需在 Docker 环境执行真实 Kafka/Redis/Compose、安装 `gcc` 后执行 race detector。
+
+## V1.0 最终验收补充：Race Detector（2026-09-29）
+
+本机安装 MSYS2 UCRT GCC 16.2.0。Go 1.27.1 测试进程直接启动 GCC 时缺少其运行库搜索路径，`runtime/cgo` 在编译阶段以状态 2 退出；仓库外的临时 `gcc-wrapper.cmd` 在子进程内补齐 MSYS2 UCRT `bin` 路径后，执行 `CGO_ENABLED=1 go test -race -count=1 ./...` 成功。测试环境同时设置真实 PostgreSQL 的 `DATABASE_URL`、运行中的本地 Go 服务 `INTEGRATION_BASE_URL`、测试服务二进制和测试用 JWT 密钥，覆盖 `tests` 包的真实端到端路径。所有包通过，`tests` 包耗时 26.511 秒；没有 data race 报告。`go vet ./...` 同次检查退出码 0。真实 Kafka 双实例测试仍因缺少第二个运行中的实例而跳过，不能由本次 race PASS 推断其已验证。
+
+本机随后安装 Docker Desktop 当前用户版与 Microsoft WSL 2.7.14.0；`docker compose --env-file .env -f deployments/compose.yaml --profile multi config --quiet` 退出码 0，列出 9 个服务。`docker info` 明确报 Docker Engine 命名管道不存在；Windows 功能启用后仍待用户重启并在 Docker Desktop GUI 接受协议。因此 `docker compose up/ps/logs`、真实 Redis/Kafka、Prometheus/Grafana 均尚未运行。本段取代上文各阶段“本机无 Docker CLI”的历史环境描述。
+
+实际执行 `docker compose --env-file .env -f deployments/compose.yaml --profile multi up --build -d` 和同配置的 `ps`，两者均以状态 1 退出，错误为 `failed to connect to the docker API at npipe:////./pipe/docker_engine`，命名管道不存在；没有任何容器被这两条命令启动。这是环境启动失败，不能算 Compose 验收通过。
