@@ -95,7 +95,7 @@ PostgreSQL 负载窗口内 25 个连接以下、活跃连接采样最高 5；相
 
 ## 回归与限制
 
-- `go test -count=1 ./...`、`go vet ./...`、`go test -race -count=1 ./...` 在不设置外部集成环境变量时全部通过。真实 PostgreSQL 批量/单条 Outbox 测试在暂停 app 发布者后通过；完整 `./tests` 在真实双实例环境通过（20.78 秒）；真 Kafka 跨实例、离线重连、幂等的定向 race 测试通过。
+- `go test -count=1 ./...`、`go vet ./...`、`go test -race -count=1 ./...` 在不设置外部集成环境变量时全部通过。真实 PostgreSQL 批量/单条 Outbox 测试在暂停 app 发布者后以普通及 `-race -count=1 -v ./internal/repository` 两种模式通过；完整 `./tests` 在真实双实例环境通过（20.78 秒）；真 Kafka 跨实例、离线重连、幂等的定向 race 测试通过。
 - 一次同时设置所有真实服务变量、并让运行中的 app 与 repository 集成测试共享库的 `go test ./...` **失败**：app 抢先发布了测试专用 Outbox 行；同次 `TestOfflineReconnectAndLostACK` 还出现重复 `message.new` 在 ACK 回执之前到达。后者单独和完整 `./tests` 重跑均通过。测试隔离和重复帧容忍仍是测试工具限制，不能删除这次失败或声称所有组合任意同时运行都稳定。
 - 真 Kafka 停机时 `TestRealKafkaOutageDurableFallback` 通过（6.66 秒）：消息 42506 数据库补发并 ACK，两类 Outbox 均待发布；Broker 重启后两类 Outbox 和全库 backlog 均为 0。恢复后立即运行严格 Kafka 测试 **失败一次**（`delivery_attempts=1`）；Broker 日志显示两组约 30 秒重平衡后稳定，重跑 0.50 秒通过。真 Redis 停机时严格跨 Kafka/ACK 测试通过（2.56 秒），已恢复 healthy。
 - 没有测试 750/1000 msg/s：本轮目标是定位并消除 500/s 的显著瓶颈。30 秒稳定不等于长期运行稳定或最大容量。Kafka 单节点、无跨主机网络；在线客户端重复事件去重仍由客户端承担。Prometheus 默认只抓 app1。其他边界见 [FINAL_VALIDATION.md](FINAL_VALIDATION.md)。

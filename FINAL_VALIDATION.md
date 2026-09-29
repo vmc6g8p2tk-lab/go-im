@@ -74,6 +74,6 @@ Redis 定向投递选路、生产级 TLS/WSS、JWT 主动吊销、PostgreSQL/Kaf
 3. 原始单条 Outbox 发布在真栈产生的积压已由 pprof、SQL、时间序列定位，并由单项批量优化消除至已测 500/s 窗口内不持续增长。简历可写明“本机完整 Compose、100 连接、30 秒、500 msg/s 目标下 498.20/s 首次送达”，不可写为生产能力、最大吞吐或无限期稳定。
 4. Prometheus 默认只抓 app1。10,000 连接首次尝试受本机端口资源限制，等待回收后低消息率重试通过；更长时间或高消息率尚未验证。群聊真 Kafka 大群、在线重复帧、长期泄漏、真实 PostgreSQL 容器宕机与跨主机网络未验收。
 5. `go.mod` 仍为 `github.com/example/go-im`，仓库没有 remote；待用户确定 GitHub 名称后再替换路径。`.env`、二进制、日志和 pprof 保持不入 Git。**本轮不新增业务功能，也不推进第二阶段。**
-6. 优化后 `go test ./...`、`go vet ./...`、`go test -race ./...` 均通过（未同时启用真实服务变量）；真实 PostgreSQL Outbox 测试、完整真实服务 `./tests`、定向真实 Kafka 双实例/离线/幂等 race 测试通过。一次把真实 repository 集成测试与运行中 app 混在同一数据库的全套运行失败，且离线重连测试曾遇一次重复帧先于 ACK 回执；隔离运行通过，失败过程见 [PERFORMANCE_INVESTIGATION.md](PERFORMANCE_INVESTIGATION.md)。Broker 恢复后严格 Kafka 测试在消费组重平衡期间也失败一次，稳定后重测通过，数据库补发仍保证消息最终正确。测试隔离与重平衡实时延迟是已知限制。
+6. 优化后 `go test ./...`、`go vet ./...`、`go test -race ./...` 均通过（未同时启用真实服务变量）；暂停 app 发布者后真实 PostgreSQL Outbox 测试以普通与 `-race` 模式通过，完整真实服务 `./tests`、定向真实 Kafka 双实例/离线/幂等 race 测试通过。一次把真实 repository 集成测试与运行中 app 混在同一数据库的全套运行失败，且离线重连测试曾遇一次重复帧先于 ACK 回执；隔离运行通过，失败过程见 [PERFORMANCE_INVESTIGATION.md](PERFORMANCE_INVESTIGATION.md)。Broker 恢复后严格 Kafka 测试在消费组重平衡期间也失败一次，稳定后重测通过，数据库补发仍保证消息最终正确。测试隔离与重平衡实时延迟是已知限制。
 
 **结论：V1.0 可以封版。** 这表示当前代码在上列本机范围内有可重复的功能、可靠性与性能证据；不代表生产可用、持续 500/s 容量上限或 Redis 定向路由已实现。尚未设置 GitHub remote/真实模块名，也未发布 `v1.0.0` tag；发布动作与命名可由用户在后续阶段决定。
