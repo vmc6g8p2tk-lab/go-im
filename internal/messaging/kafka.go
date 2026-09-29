@@ -56,6 +56,8 @@ func (k *Kafka) Publish(ctx context.Context, event repository.OutboxEvent) error
 	key := "u:" + strconv.FormatInt(event.RecipientID, 10)
 	if event.GroupID > 0 {
 		key = "g:" + strconv.FormatInt(event.GroupID, 10)
+	} else if event.SenderID > 0 {
+		key = "u:" + strconv.FormatInt(event.SenderID, 10)
 	}
 	err = k.writer.WriteMessages(ctx, kafka.Message{Key: []byte(key), Value: value})
 	if k.Metrics != nil {
@@ -89,7 +91,7 @@ func (k *Kafka) RunConsumer(ctx context.Context, handle func(context.Context, re
 			k.Metrics.KafkaConsumerUp.Set(1)
 		}
 		var event repository.OutboxEvent
-		if err := json.Unmarshal(message.Value, &event); err != nil || event.MessageID <= 0 || (event.RecipientID <= 0 && event.GroupID <= 0) || (event.RecipientID > 0 && event.GroupID > 0) {
+		if err := json.Unmarshal(message.Value, &event); err != nil || !validEvent(event) {
 			slog.Error("invalid Kafka event", "error", err)
 		} else {
 			for ctx.Err() == nil {
@@ -122,6 +124,19 @@ func (k *Kafka) RunConsumer(ctx context.Context, handle func(context.Context, re
 	}
 }
 
+func validEvent(event repository.OutboxEvent) bool {
+	if event.MessageID <= 0 {
+		return false
+	}
+	targets := 0
+	for _, id := range []int64{event.RecipientID, event.GroupID, event.SenderID} {
+		if id > 0 {
+			targets++
+		}
+	}
+	return targets == 1 && (event.SenderID == 0 && event.Status == "" || event.SenderID > 0 && event.Status == "delivered")
+}
+
 func RunPublisher(ctx context.Context, store *repository.Store, publish func(context.Context, repository.OutboxEvent) error) {
 	for ctx.Err() == nil {
 		operationCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
@@ -143,6 +158,20 @@ func RunGroupPublisher(ctx context.Context, store *repository.Store, publish fun
 		cancel()
 		if err != nil {
 			slog.Warn("Kafka group outbox publish failed", "error", err)
+			wait(ctx, 2*time.Second)
+		} else if !found {
+			wait(ctx, 200*time.Millisecond)
+		}
+	}
+}
+
+func RunStatusPublisher(ctx context.Context, store *repository.Store, publish func(context.Context, repository.OutboxEvent) error) {
+	for ctx.Err() == nil {
+		operationCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		found, err := store.PublishNextStatus(operationCtx, publish)
+		cancel()
+		if err != nil {
+			slog.Warn("Kafka status outbox publish failed", "error", err)
 			wait(ctx, 2*time.Second)
 		} else if !found {
 			wait(ctx, 200*time.Millisecond)

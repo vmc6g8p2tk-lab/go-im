@@ -65,6 +65,10 @@ func TestDeliveryAcknowledgmentAndDuplicateACK(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT delivery_status, delivered_at FROM messages WHERE id=$1`, messageID).Scan(&status, &deliveredAt); err != nil || status != "delivered" || deliveredAt.IsZero() {
 		t.Fatalf("persisted delivery status=%q at=%v err=%v", status, deliveredAt, err)
 	}
+	var statusOutboxCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM delivery_status_outbox WHERE message_id=$1`, messageID).Scan(&statusOutboxCount); err != nil || statusOutboxCount != 1 {
+		t.Fatalf("delivery status outbox count=%d err=%v", statusOutboxCount, err)
+	}
 	if err := bc.WriteJSON(map[string]any{"type": "delivery.ack", "message_id": messageID}); err != nil {
 		t.Fatal(err)
 	}
@@ -74,6 +78,9 @@ func TestDeliveryAcknowledgmentAndDuplicateACK(t *testing.T) {
 	var secondDeliveredAt time.Time
 	if err := pool.QueryRow(ctx, `SELECT delivered_at FROM messages WHERE id=$1`, messageID).Scan(&secondDeliveredAt); err != nil || !secondDeliveredAt.Equal(deliveredAt) {
 		t.Fatalf("duplicate ACK changed delivered_at: %v -> %v, err=%v", deliveredAt, secondDeliveredAt, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM delivery_status_outbox WHERE message_id=$1`, messageID).Scan(&statusOutboxCount); err != nil || statusOutboxCount != 1 {
+		t.Fatalf("duplicate ACK status outbox count=%d err=%v", statusOutboxCount, err)
 	}
 }
 

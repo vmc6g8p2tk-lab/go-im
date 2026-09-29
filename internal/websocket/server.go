@@ -244,6 +244,22 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Replays have no database side effect. Clients deduplicate repeated frames by
 // message.id, since a crash can replay a published event.
 func (s *Server) HandleOutboxEvent(ctx context.Context, event repository.OutboxEvent) error {
+	if event.SenderID > 0 {
+		message, err := s.Service.Store.MessageByID(ctx, event.MessageID)
+		if err != nil {
+			return err
+		}
+		if message.SenderID != event.SenderID || message.DeliveryStatus != "delivered" || event.Status != "delivered" {
+			return errors.New("Kafka delivery status does not match message")
+		}
+		status, err := json.Marshal(map[string]any{"type": "message.status", "message_id": message.ID,
+			"status": message.DeliveryStatus, "delivered_at": message.DeliveredAt})
+		if err != nil {
+			return err
+		}
+		s.Hub.deliver(message.SenderID, status)
+		return nil
+	}
 	if event.GroupID > 0 {
 		message, err := s.Service.Store.GroupMessageByID(ctx, event.MessageID)
 		if err != nil {
@@ -397,8 +413,10 @@ func (s *Server) handleDeliveryAck(parent context.Context, c *client, messageID 
 				s.Metrics.AckLatency.Observe(message.DeliveredAt.Sub(message.CreatedAt).Seconds())
 			}
 		}
-		status, _ := json.Marshal(map[string]any{"type": "message.status", "message_id": message.ID, "status": "delivered", "delivered_at": message.DeliveredAt})
-		s.Hub.deliver(message.SenderID, status)
+		if !s.AsyncDelivery {
+			status, _ := json.Marshal(map[string]any{"type": "message.status", "message_id": message.ID, "status": "delivered", "delivered_at": message.DeliveredAt})
+			s.Hub.deliver(message.SenderID, status)
+		}
 	}
 }
 

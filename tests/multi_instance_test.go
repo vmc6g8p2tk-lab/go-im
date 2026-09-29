@@ -93,6 +93,12 @@ func TestCrossInstanceConsumerDelivery(t *testing.T) {
 	if frame, err := readTypedFrame(bc); err != nil || frame.Type != "delivery.ack.ok" {
 		t.Fatalf("delivery ACK=%+v err=%v", frame, err)
 	}
+	if err := aServer.HandleOutboxEvent(ctx, repository.OutboxEvent{MessageID: messageID, SenderID: a.ID, Status: "delivered"}); err != nil {
+		t.Fatal(err)
+	}
+	if frame, err := readTypedFrame(ac); err != nil || frame.Type != "message.status" || frame.MessageID != messageID || frame.Status != "delivered" {
+		t.Fatalf("cross-instance sender status=%+v err=%v", frame, err)
+	}
 	// Replayed Kafka events may resend the same frame; the row and its ACK stay
 	// singular. The client protocol requires deduplication by message.id.
 	if err := bServer.HandleOutboxEvent(ctx, event); err != nil {

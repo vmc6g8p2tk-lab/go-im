@@ -21,9 +21,11 @@ type Store struct{ DB *pgxpool.Pool }
 // OutboxEvent is created by the database trigger in the same transaction as
 // its message. It is a durable notification, never the message source of truth.
 type OutboxEvent struct {
-	MessageID   int64 `json:"message_id"`
-	RecipientID int64 `json:"recipient_id"`
-	GroupID     int64 `json:"group_id,omitempty"`
+	MessageID   int64  `json:"message_id"`
+	RecipientID int64  `json:"recipient_id,omitempty"`
+	GroupID     int64  `json:"group_id,omitempty"`
+	SenderID    int64  `json:"sender_id,omitempty"`
+	Status      string `json:"status,omitempty"`
 }
 
 // PublishNext keeps the row locked until Kafka confirms the write. A crash

@@ -118,3 +118,9 @@ ok  github.com/example/go-im/tests  1.097s
 ## V1.0 迭代：Docker 开发环境静态检查（2026-09-29）
 
 对照 Apache Kafka 官方单节点 KRaft 配置，补充 Kafka 数据卷、固定开发集群 ID、日志目录与单节点内部 Topic 复制因子；Compose YAML 重新解析得到 9 个服务。`scripts/verify-compose.ps1` 提供有 Docker 时的配置校验、启动、健康探测和 Topic 核查入口，PowerShell 语法解析为 0 个错误。本机 `docker` 与 `docker-compose` 命令均不存在，**没有执行 `docker compose config`、镜像构建、容器启动或脚本运行**；这些仍需安装并启动 Docker Desktop 后验证。
+
+## V1.0 迭代：跨实例送达状态与并发检查（2026-09-29）
+
+在现有真实 PostgreSQL 18.3 实例上执行迁移 `024`–`027`。`TestDeliveryAcknowledgmentAndDuplicateACK` 验证首次 ACK 产生一条 `delivery_status_outbox` 行、重复 ACK 不增加行数；`TestDeliveryStatusOutboxPublishAndRetry` 模拟 Kafka 发布失败后确认 outbox 仍待处理，成功后确认标记已发布；`TestCrossInstanceConsumerDelivery` 以两个独立 Hub 和真实数据库、模拟消费边界验证 ACK 实例与发送者实例不同仍收到 `message.status`。`TestValidEventTargets` 验证三种事件类型及混合目标拒绝。完整 `go test -count=1 ./...` 与 `go vet ./...` 均通过。这里的发布与消费是注入函数和模拟边界，**真实 Kafka Broker 未验证**。
+
+尝试 `go test -race ./internal/websocket ./internal/messaging`：默认因 CGO 关闭失败；显式设置 `CGO_ENABLED=1` 后因本机缺少 `gcc` C 编译器失败。没有得到 race detector 的通过结论；安装兼容 Go 的 C 编译器并确认 PATH 后需重跑 `go test -race ./...`。

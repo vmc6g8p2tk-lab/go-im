@@ -139,7 +139,9 @@ Redis 在线路由和 Kafka 发布/消费代码可选接入；监控指标已接
 
 Topic `im.message.created.v1` 使用接收者 ID 作为 Partition Key。同一分区内部保留 Kafka 写入顺序；多发布者并发领取、数据库提交时序、客户端重连补发都会使端到端严格会话顺序不能保证。客户端按服务端消息 ID 排序展示和去重。每个实例有独立 Consumer Group `im-delivery-{instance_id}`，收到事件后再次从 PostgreSQL 读取消息，仅投递本地连接，处理成功后提交 offset。这样每个实例都能看到事件，但 Kafka 读取和数据库查询成本随实例数线性增长；大规模方案应考虑按路由转发或专用网关，且需要失效路由的恢复路径。
 
-配置 `KAFKA_BROKERS` 后，新消息不再直接投递本地接收连接，而是由 Kafka 消费链路投递；发送方的 `server_ack` 仍在数据库写入后立刻返回。Kafka 不可用时消息与 outbox 留在 PostgreSQL；在线接收者可被现有数据库重试循环补发，离线接收者下次连接同步。Kafka 消费重放可能生成重复 WebSocket 帧，但不能新建第二条逻辑消息；接收方应按 `message.id` 去重、重复 ACK。跨实例 ACK 的 `message.status` 目前只通知 ACK 所在实例的发送方连接，其他实例的发送方需查历史状态，此缺口待修复。
+配置 `KAFKA_BROKERS` 后，新消息不再直接投递本地接收连接，而是由 Kafka 消费链路投递；发送方的 `server_ack` 仍在数据库写入后立刻返回。Kafka 不可用时消息与 outbox 留在 PostgreSQL；在线接收者可被现有数据库重试循环补发，离线接收者下次连接同步。Kafka 消费重放可能生成重复 WebSocket 帧，但不能新建第二条逻辑消息；接收方应按 `message.id` 去重、重复 ACK。
+
+接收方 ACK 把 `messages.delivery_status` 从 `created` 改为 `delivered` 时，数据库触发器在同一事务创建 `delivery_status_outbox` 行。独立发布循环将 `{message_id,sender_id,status}` 写入相同 Topic，以 `u:{sender_id}` 为 Partition Key；各实例消费后按消息 ID 重新核验数据库状态，只通知本实例的发送者连接。Kafka 模式下 ACK 实例不再直接发本地 `message.status`，避免正常路径双发。发布失败保留 outbox；Kafka 接受后、数据库提交前崩溃仍可能重复通知，客户端按消息 ID 去重。未配置 Kafka 时保留单实例本地通知。这个路径已通过真实 PostgreSQL 加模拟消费边界测试，真实 Broker 链路仍待验证。
 
 ### 基础群聊（最多 100 人）
 

@@ -77,6 +77,7 @@ tests                  真实服务端到端测试
 ## 已知边界
 
 - Hub 只管理本实例连接；Kafka 每实例独立消费组传播消息事件。PostgreSQL 中的未确认消息可由在线重试循环和重连同步补发。双进程数据库补发路径已测试；真实 Kafka 与真实 Redis 跨实例路径仍未验证。
+- 跨实例送达状态使用 PostgreSQL `delivery_status_outbox` 和 Kafka 事件通知发送者；已测真实数据库事务和模拟消费边界，真实 Broker 待验证。
 - 已实现送达 ACK 和重试，但客户端仍需去重；旧客户端不传 ID 时重发仍可能重复写库。已读 ACK 尚未实现。
 - JWT 在到期前不可主动吊销；生产环境需要 TLS/WSS、密钥管理与限流。
 - `go.mod` 暂用 `github.com/example/go-im`，发布到你的 GitHub 仓库前应替换为实际仓库路径并更新 Go import。

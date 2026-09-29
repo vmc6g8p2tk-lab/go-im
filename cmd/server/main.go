@@ -98,14 +98,20 @@ func run() error {
 	retryCtx, retryCancel := context.WithCancel(ctx)
 	kafkaPublisherDone := make(chan struct{})
 	groupPublisherDone := make(chan struct{})
+	statusPublisherDone := make(chan struct{})
 	kafkaConsumerDone := make(chan struct{})
 	if broker != nil {
 		go func() { defer close(kafkaPublisherDone); messaging.RunPublisher(retryCtx, store, broker.Publish) }()
 		go func() { defer close(kafkaConsumerDone); broker.RunConsumer(retryCtx, wsServer.HandleOutboxEvent) }()
 		go func() { defer close(groupPublisherDone); messaging.RunGroupPublisher(retryCtx, store, broker.Publish) }()
+		go func() {
+			defer close(statusPublisherDone)
+			messaging.RunStatusPublisher(retryCtx, store, broker.Publish)
+		}()
 	} else {
 		close(kafkaPublisherDone)
 		close(groupPublisherDone)
+		close(statusPublisherDone)
 		close(kafkaConsumerDone)
 	}
 	retryDone := make(chan struct{})
@@ -153,6 +159,7 @@ func run() error {
 	<-presenceDone
 	<-kafkaPublisherDone
 	<-groupPublisherDone
+	<-statusPublisherDone
 	<-kafkaConsumerDone
 	if broker != nil {
 		broker.Close()
