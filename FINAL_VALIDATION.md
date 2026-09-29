@@ -1,6 +1,6 @@
 # Go IM V1.0 最终真实环境验收
 
-日期：2026-09-29（Asia/Shanghai）。本次从此前 Docker Engine 不可用的断点继续，在**实际 Docker Desktop Engine** 上执行。结论：**暂不封版，不打 `v1.0.0` tag，不把现有压测数字写成稳态最大吞吐。** 现有功能可在本机 Compose 中演示，但高负载延迟、Outbox 积压和 Redis 路由的功能边界需要明确处理。原始负载 JSON 见 [BENCHMARK.md](BENCHMARK.md)，故障过程见 [FAILURE_TEST.md](FAILURE_TEST.md)。
+日期：2026-09-29（Asia/Shanghai）。本次在**实际 Docker Desktop Engine** 完成首次验收，随后针对 500 msg/s 时的 Outbox 积压做完整栈剖析、一次最小优化和同条件复测。**最终判断：V1.0 可以封版，范围限本机完整 Compose 已测功能与负载；没有生产级或跨主机容量结论。** 原始性能证据与失败记录见 [PERFORMANCE_INVESTIGATION.md](PERFORMANCE_INVESTIGATION.md)，历史负载见 [BENCHMARK.md](BENCHMARK.md)，故障过程见 [FAILURE_TEST.md](FAILURE_TEST.md)。
 
 ## 验收状态分类
 
@@ -10,7 +10,7 @@ Docker Engine/Compose 完整启动、真 Redis Presence Key/TTL/心跳/自然过
 
 ### 【代码已实现但未完全验证】
 
-群聊真 Kafka 大群扇出、10000 连接长时间或高消息率稳定性、完整栈消息最大稳态吞吐、在线客户端收到 Kafka 重复事件后的去重、多实例监控聚合及真实 PostgreSQL 容器宕机恢复均未完成对应验收。500 条/秒目标已经导致明显积压，不能把窗口内 208.09 条/秒称作最大稳定吞吐。
+群聊真 Kafka 大群扇出、10000 连接长时间或高消息率稳定性、完整栈消息最大稳态吞吐、在线客户端收到 Kafka 重复事件后的去重、多实例监控聚合及真实 PostgreSQL 容器宕机恢复均未完成对应验收。旧版本 500 条/秒曾导致明显积压；优化后已在相同 10 秒负载重复两次，并以相同速率延长到 30 秒，不能把这些结果当成系统最大容量。
 
 ### 【未实现】
 
@@ -18,7 +18,7 @@ Redis 定向投递选路、生产级 TLS/WSS、JWT 主动吊销、PostgreSQL/Kaf
 
 ### 【环境限制】
 
-本轮只在单台 Windows 主机的 Docker Desktop/WSL2 中运行，Kafka 单 Broker 单副本。首次 10000 连接尝试被 Windows 临时端口占用打断，端口回收后重试通过；未在独立压测机或跨主机网络复验。完整栈 CPU/RSS 指标仅采样 app1，不能代表整栈资源。项目尚无 GitHub remote 或实际模块路径。
+本轮只在单台 Windows 主机的 Docker Desktop/WSL2 中运行，Kafka 单 Broker 单副本。首次 10000 连接尝试被 Windows 临时端口占用打断，端口回收后重试通过；未在独立压测机或跨主机网络复验。新增 500/s 调查逐秒采集 app1/app2、PostgreSQL、Kafka 与 Docker Stats，但不是持续全链路追踪。项目尚无 GitHub remote 或实际模块路径。
 
 ## 环境与启动证据
 
@@ -48,7 +48,7 @@ Redis 定向投递选路、生产级 TLS/WSS、JWT 主动吊销、PostgreSQL/Kaf
 
 ## 完整 Compose 性能与资源
 
-客户端从 Windows 通过回环连 app1；app2 同时消费 Kafka 事件。CPU/RSS/goroutine 由 app1 `/metrics` 采样，**不包含**压测进程、app2、PostgreSQL、Redis、Kafka、Prometheus、Grafana。Docker Stats 在 500 条/秒档后显示 Kafka 约 973 MiB、PostgreSQL约 112 MiB；这些是单次事后快照，不是区间峰值。具体参数与原始 JSON 见 [BENCHMARK.md](BENCHMARK.md)。
+以下表格保留最初版本的真实验收历史。客户端从 Windows 通过回环连 app1；app2 同时消费 Kafka 事件。原始 CPU/RSS/goroutine 仅来自 app1 `/metrics`，不包含其它组件；原始 Docker Stats 事后快照不是区间峰值。**后续同条件逐秒完整栈对比单独列于下方及 [PERFORMANCE_INVESTIGATION.md](PERFORMANCE_INVESTIGATION.md)。**
 
 | 负载 | 实测结果 | 限制 |
 | --- | --- | --- |
@@ -59,14 +59,21 @@ Redis 定向投递选路、生产级 TLS/WSS、JWT 主动吊销、PostgreSQL/Kaf
 | 首次 10000 连接尝试 | 第 9049 条由 Windows `connectex` 报本地 socket 地址/端口不可用，未进入发送窗口。 | 此前连续关闭 2000/5000 连接；不能归因于服务端上限。动态端口范围 49152–65535。退出后服务连接/队列 Gauge 均为 0。 |
 | 端口回收后单独重试 10000 连接 | 10000/10000 建连，49/49 首次送达，0 工具失败/意外断连，P95 215 ms、P99 231 ms，app1 峰值 RSS 364.4 MiB、20042 goroutine。 | 仅 100 用户、5 条/秒、10 秒发送窗口；4851 个额外设备帧，不能证明 10000 连接在高吞吐下稳定。退出后连接/队列 Gauge 均为 0、Outbox 为空。 |
 
-100 条/秒档已出现明显延迟，500 条/秒档出现积压，故按停止条件不继续 1000/2000/5000 条/秒档。这里测到的是特定发送窗口的客户端首次送达率，不是系统最大吞吐。此前非容器、无 Redis/Kafka 的 5000 连接回环结果不能与完整栈混写。
+最初 100 条/秒档已出现明显延迟，500 条/秒档出现积压，因此当时按停止条件未继续升档。该故障没有被删除，后来在相同真实栈上剖析并优化。此前非容器、无 Redis/Kafka 的 5000 连接回环结果不能与完整栈混写。
+
+### Outbox 瓶颈修复后的同条件对比
+
+仍是完整 Compose、100 连接/100 用户、目标 500 msg/s、10 秒发送 + 3 秒排空。修改前可重复 Baseline（与上表最初 500 单次验收不同的一轮）发送 4999、窗口首次送达 1780（177.97/s），P95/P99 6906.5/7174.2 ms；逐秒 Message/Status Outbox 发送窗峰值 4153/1078，发送后 Status 峰值 2740。容器内 pprof 和负载中 SQL/Consumer Group 采样确认主要瓶颈为**单条 Outbox 同步写 Kafka，两个实例每类 Outbox 各一条串行发布循环**，而不是 Kafka 消费 lag 或 Outbox 索引全表扫描。优化仅将最多 32 条在一次事务内批量写 Kafka 并批量标记已发布，保留 `RequireAll`、`SKIP LOCKED` 和至少一次语义。
+
+优化后两次同条件复测分别发送 4997/4998、窗口首次送达 4978/4978（497.78/497.77/s），P95 56.0/58.0 ms、P99 70.0/87.0 ms；Message/Status Outbox 峰值 22/37 与 26/31。Kafka 两组 lag 在负载期间峰值分别 3/3 与 12/7，绝不把测试结束 lag 0 当成全程 lag 0。第 2 轮数据库直接查 4998 条最终均 delivered，两类 Outbox 均发布、数据库重试 0。保持 500/s 的额外 **30 秒** 试验：14970 发、14946 窗口首次送达（498.20/s）、P95/P99 58/83 ms，Message/Status 待发布逐秒峰值 24/27，时间线无上升趋势，数据库 14970 条最终全部 delivered、Outbox 发布。0 工具失败和意外断连。此结论仅覆盖本机、这一负载模型、最长 30 秒；没有测试 750/1000 msg/s，也没有声明最大稳态吞吐。
 
 ## 代码边界与封版判断
 
 1. Redis `im:route:<user>` 是可过期在线实例提示。**当前生产投递路径未调用 `RedisStore.Instances`**；Kafka 采用每实例独立消费组广播事件，本地 Hub 决定是否投递。将此版本称为“Redis 定向路由”会误导，README 和学习记录应按代码实际描述。
 2. 单节点 Kafka replication factor 1、单 PostgreSQL、单 Redis 只适合本机开发验证；没有跨主机、高可用与长期运行数据。Broker/实例重启可恢复，但消费组重平衡期间实时路径存在约 30 秒窗口。
-3. 高频负载的 Outbox 单条发布和状态事件成本已经在真栈产生积压；在无改动、无重复测量前不能给出稳态容量或简历上的“高并发吞吐量”。
+3. 原始单条 Outbox 发布在真栈产生的积压已由 pprof、SQL、时间序列定位，并由单项批量优化消除至已测 500/s 窗口内不持续增长。简历可写明“本机完整 Compose、100 连接、30 秒、500 msg/s 目标下 498.20/s 首次送达”，不可写为生产能力、最大吞吐或无限期稳定。
 4. Prometheus 默认只抓 app1。10,000 连接首次尝试受本机端口资源限制，等待回收后低消息率重试通过；更长时间或高消息率尚未验证。群聊真 Kafka 大群、在线重复帧、长期泄漏、真实 PostgreSQL 容器宕机与跨主机网络未验收。
 5. `go.mod` 仍为 `github.com/example/go-im`，仓库没有 remote；待用户确定 GitHub 名称后再替换路径。`.env`、二进制、日志和 pprof 保持不入 Git。**本轮不新增业务功能，也不推进第二阶段。**
+6. 优化后 `go test ./...`、`go vet ./...`、`go test -race ./...` 均通过（未同时启用真实服务变量）；真实 PostgreSQL Outbox 测试、完整真实服务 `./tests`、定向真实 Kafka 双实例/离线/幂等 race 测试通过。一次把真实 repository 集成测试与运行中 app 混在同一数据库的全套运行失败，且离线重连测试曾遇一次重复帧先于 ACK 回执；隔离运行通过，失败过程见 [PERFORMANCE_INVESTIGATION.md](PERFORMANCE_INVESTIGATION.md)。Broker 恢复后严格 Kafka 测试在消费组重平衡期间也失败一次，稳定后重测通过，数据库补发仍保证消息最终正确。测试隔离与重平衡实时延迟是已知限制。
 
-因此 V1.0 可以作为**本机演示与学习里程碑**，但目前**不正式封版**。若要封版，需要先确定并记录目标门槛，再针对高负载积压、监控第二实例、Redis 路由定位以及 10,000 连接更长时间/更高消息率逐项补证；任何后续实现或性能改动都应由独立任务授权。
+**结论：V1.0 可以封版。** 这表示当前代码在上列本机范围内有可重复的功能、可靠性与性能证据；不代表生产可用、持续 500/s 容量上限或 Redis 定向路由已实现。尚未设置 GitHub remote/真实模块名，也未发布 `v1.0.0` tag；发布动作与命名可由用户在后续阶段决定。

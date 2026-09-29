@@ -29,3 +29,11 @@
 | app2 异常停止与 Redis 路由 TTL | 向 app2 建立两条真实连接，用户 888 的 `im:route:888` 为 `app2`、TTL 55 秒；执行 `docker compose stop -t 0 app2` 后成员仍在、TTL 47 秒，之后 TTL 5 秒，最终 `EXISTS=0`、`TTL=-2`。客户端记录 2 次预期断连。app2 已重新启动。 | 只验证该 Key 的真实 Redis TTL 自然过期；没有在第 30 秒调用应用的 `Instances` 方法判断过滤结果。强停客户端故障负载原始 JSON 见 [结果](benchmarks/results/compose-app2-crash-client.json)。 |
 
 真 PostgreSQL 容器停止/恢复、主从切换、跨主机分区、长期连接泄漏仍未执行。新增 Kafka Broker 故障测试需要运行时设置 `INTEGRATION_KAFKA_OUTAGE=1` 且手动先停止 Broker；绝不能在 Broker 正常时把它当作故障测试通过。完整总结见 [FINAL_VALIDATION.md](FINAL_VALIDATION.md)。
+
+## Outbox 批量发布后的真服务回归（2026-09-29）
+
+优化提交 `6eaffa8` 后，先在暂停两台 app 发布者的真实 PostgreSQL 上运行 `TestOutboxBatchRollbackAndMark`：消息与状态各 2 条，注入 Broker 错误后均保持待发布，再次成功后均标记已发布；原有单条 Outbox 回滚测试同时通过。真实 Kafka 停机后 `TestRealKafkaOutageDurableFallback` 通过（6.66 秒），消息 ID 42506 通过 PostgreSQL 补发并 ACK；直接查询该消息两类 Outbox 均为待发布。Kafka 重启健康后两类 Outbox 均已发布，全库待发布 0。
+
+恢复后立即运行严格纯 Kafka 跨实例测试**失败一次**：`delivery_attempts=1`，数据库补发先于 Consumer Group 完成重平衡；Broker 日志随后显示两组约 30 秒后稳定、各分区 lag 0；重跑通过（0.50 秒，`delivery_attempts=0`）。这与此前实例重启时的恢复窗口一致，不能记为“瞬时恢复”。真实 Redis 停机期间再次执行跨 Kafka 消息和 ACK 测试通过（2.56 秒），Redis 重启后 `PING=PONG` 且 healthy。
+
+完整环境变量一次性对 `go test ./...` 启用后，有运行中的 app 抢先发布 repository 集成测试自己的 Outbox 行，导致测试失败；同次离线重连测试收到重复 `message.new` 抢在 ACK 回执前。隔离暂停 app 后 repository 集成测试通过，完整端到端 `./tests` 独立重跑通过；详情见 [PERFORMANCE_INVESTIGATION.md](PERFORMANCE_INVESTIGATION.md)。这些失败记录保留，测试套件并行共享数据库的假设仍需在将来改进。

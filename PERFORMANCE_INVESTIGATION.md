@@ -51,3 +51,51 @@ PostgreSQL 负载窗口内 25 个连接以下、活跃连接采样最高 5；相
 为避免 Block profile 中自进程启动以来的累计等待误导，另一次相同 500/s 诊断负载在发送中采集相隔 4.24 秒的 Block 和 Mutex 快照，计算 pprof diff。`RunPublisher → PublishNext → Kafka.Publish → kafka.Writer.WriteMessages → runtime.selectgo` 累计阻塞 **3.56 秒**；相同状态发布路径阻塞 **3.74 秒**。两个各自串行的发布循环在此窗口几乎都在等待同步 Producer。Mutex profile diff 总量只有约 **16.13 ms**，发布路径占比不足 1 ms。Goroutine 快照确有每类 Outbox 各一条发布 goroutine。诊断负载 4998 条、发送窗口首次送达约 202.49/s、P95 6867.9 ms、工具失败 0；参见[诊断负载](benchmarks/results/fullstack-diagnostic-500-load.json)、[采样时刻](benchmarks/results/fullstack-diagnostic-times.txt)。二进制 pprof 原始文件留在本机 `work` 目录，不把不稳定的构建路径归档进 Git。
 
 **结论：主要瓶颈是每条 Outbox 事件单独同步 Kafka `WriteMessages`，两个实例各自每种 Outbox 只有一条串行发布循环；事务同时横跨 Broker 确认，造成逐条数据库往返和长事务。** Kafka 消费 lag 在负载期间逐秒为 0，Outbox 索引扫描亚毫秒且 PostgreSQL CPU 未饱和，故不先调 Consumer、索引或连接池。下一步仅把一次锁定、写 Kafka、标记已发布扩展为小批次；仍使用 `RequireAll`，仍在 Broker 确认后更新 Outbox，保留至少一次投递与崩溃后可能重复的语义。
+
+## 最小优化与可重复复测
+
+优化提交 `6eaffa8`：Message 和 Status Outbox 各次最多取 32 行，保留 `FOR UPDATE SKIP LOCKED` 和原有部分索引；Kafka Writer 仍复用、`RequiredAcks=RequireAll`、`BatchTimeout=20ms`、同步等待，只是一次 `WriteMessages` 传入整批；Broker 成功后用一条 `UPDATE ... WHERE message_id = ANY($1::bigint[])` 标记整批，检查受影响行数再提交。错误则回滚整批，事件继续待发布。未改变 Topic、分区键、协议、ACK、消费者或其他业务路径。代价：Broker 已接受而 DB 提交失败时可能重复整批事件；DB 事务持锁的最长时间仍覆盖一次 Broker 确认。真 PostgreSQL `TestOutboxBatchRollbackAndMark` 验证 Message/Status 两类 2 行批次错误后均保留、成功后均标记；客户端和消费者必须继续按消息 ID 幂等处理。
+
+与 Baseline 同为 100 连接/100 用户、目标 500/s、10 秒发送 + 3 秒排空；两个 app 与全部基础设施真实运行，无 pprof 采样，使用相同逐秒观测方法。第一轮 Docker Stats 子进程因 PowerShell 执行策略未启动，故保留该轮负载/PG/Kafka/app 数据但不拿它比较容器资源；第二轮修正子进程启动并完整采集。三个测试开始前 Outbox 均为 0。相同配置前后结果如下：
+
+| 指标 | 修改前 Baseline | 优化后第 1 轮 | 优化后第 2 轮 |
+| --- | ---: | ---: | ---: |
+| 实际发送 / 秒 | 4999 / 10.0018 = 499.8 | 4997 / 10.0005 = 499.7 | 4998 / 10.0005 = 499.8 |
+| 窗口首次送达 / 秒 | **177.97**（1780 条） | **497.78**（4978 条） | **497.77**（4978 条） |
+| 3 秒排空后累计首次送达 | 3770 | 4997 | 4998 |
+| P50 / P95 / P99 ms | 5753.5 / 6906.5 / 7174.2 | 39.0 / 56.0 / 70.0 | 42.0 / 58.0 / 87.0 |
+| 逐秒采样 Message Outbox 峰值 | 4153 | 22 | 26 |
+| 逐秒采样 Status Outbox 峰值（发送窗） | 1078；发送后 2740 | 37 | 31 |
+| 逐秒采样 Kafka lag 峰值 app1/app2 | 0 / 0 | 3 / 3 | 12 / 7 |
+| 两实例 Kafka 发布成功计数增量 | 1744 | 9994 | 9996 |
+| PG 提交事务增量 | 16935 | 34574 | 33700 |
+| PG 活跃连接采样峰值 | 5 | 7 | 8 |
+| app1/app2 CPU 秒增长 | 3.61 / 1.26 | 6.56 / 3.40 | 6.08 / 3.21 |
+| app1/app2 RSS 采样峰值 MiB | 93.7 / 31.5 | 42.9 / 28.0 | 46.1 / 34.9 |
+| 工具失败 / 意外断连 | 0 / 0 | 0 / 0 | 0 / 0 |
+
+这些 CPU/RSS 是不同运行的采样，基线已经处理大量历史负载，**不能将 RSS 较低归因于批量优化**。CPU 增长反映实际处理更多事件；第二轮 `docker stats` 负载窗口 5 个样本的均值/峰值：app1 52.49/63.57%、app2 28.40/33.47%、PostgreSQL 59.36/69.06%、Kafka 89.85/238.70%。均非精确持续峰值。第二轮全部 61 个 PostgreSQL/Kafka/app 逐秒样本无采集错误。其时间序列如下：
+
+| t 秒 | Message 待发布 | Status 待发布 | Kafka lag app1/app2 |
+| ---: | ---: | ---: | ---: |
+| -0.6 | 0 | 0 | 0 / 0 |
+| 0.4 | 20 | 31 | 12 / 7 |
+| 2.4 | 26 | 24 | 4 / 0 |
+| 4.4 | 13 | 14 | 0 / 0 |
+| 6.4 | 24 | 23 | 2 / 0 |
+| 8.4 | 18 | 23 | 0 / 0 |
+| 9.4 | 18 | 22 | 0 / 0 |
+| 10.4 | 0 | 0 | 0 / 0 |
+
+直接按第二轮发送窗口查询真实 PostgreSQL：4998 条消息均 `delivered`，各自 Message/Status Outbox 均已发布，`delivery_attempts>0` 为 0；全库两类待发布为 0。原始文件：[第 1 轮负载](benchmarks/results/fullstack-after-batch-500-load.json)、[第 1 轮逐秒样本](benchmarks/results/fullstack-after-batch-500-observe.jsonl)、[第 2 轮负载](benchmarks/results/fullstack-after-batch-500-repeat-load.json)、[第 2 轮逐秒样本](benchmarks/results/fullstack-after-batch-500-repeat-observe.jsonl)、[第 2 轮 Docker Stats](benchmarks/results/fullstack-after-batch-500-repeat-docker.psv)。
+
+### 保持 500/s 的 30 秒稳定性检查
+
+这是额外稳定性检查，**不与 10 秒 Baseline 混作一组同条件因果对比**。100 连接/100 用户、目标 500/s、30 秒发送 + 3 秒排空：发送 14970 条，发送窗口首次送达 14946 条，**498.20 条/秒**；P50/P95/P99 41.0/58.0/83.0 ms，工具失败/意外断连/重复帧均为 0。61 个逐秒样本错误数 0，负载窗 Message/Status Outbox 峰值 24/27，Kafka lag 每组峰值 37/39，均为短时而非无界增长。t=0.5、5.5、10.5、15.5、20.5、25.5、30.5 秒时，Message 待发布为 19、13、18、14、15、13、0；Status 为 16、13、23、13、14、15、0。两组 lag 在 30.5 秒为 0。直接查真实 PostgreSQL：14970 条全部 delivered、两类 Outbox 均已发布，重试 `delivery_attempts>0` 为 0。发送结束后 app1/app2 连接 Gauge 0，goroutine 40/39。负载期 15 个 Docker Stats 样本均值/峰值 CPU：app1 63.91/75.10%、app2 33.65/41.85%、PostgreSQL 70.32/88.20%、Kafka 133.35/483.12%。这只证明此单机完整 Compose 负载模型下 30 秒稳定，不能外推到生产或长期容量。[30 秒负载](benchmarks/results/fullstack-after-batch-500-30s-load.json)、[逐秒样本](benchmarks/results/fullstack-after-batch-500-30s-observe.jsonl)、[Docker Stats](benchmarks/results/fullstack-after-batch-500-30s-docker.psv)。
+
+## 回归与限制
+
+- `go test -count=1 ./...`、`go vet ./...`、`go test -race -count=1 ./...` 在不设置外部集成环境变量时全部通过。真实 PostgreSQL 批量/单条 Outbox 测试在暂停 app 发布者后通过；完整 `./tests` 在真实双实例环境通过（20.78 秒）；真 Kafka 跨实例、离线重连、幂等的定向 race 测试通过。
+- 一次同时设置所有真实服务变量、并让运行中的 app 与 repository 集成测试共享库的 `go test ./...` **失败**：app 抢先发布了测试专用 Outbox 行；同次 `TestOfflineReconnectAndLostACK` 还出现重复 `message.new` 在 ACK 回执之前到达。后者单独和完整 `./tests` 重跑均通过。测试隔离和重复帧容忍仍是测试工具限制，不能删除这次失败或声称所有组合任意同时运行都稳定。
+- 真 Kafka 停机时 `TestRealKafkaOutageDurableFallback` 通过（6.66 秒）：消息 42506 数据库补发并 ACK，两类 Outbox 均待发布；Broker 重启后两类 Outbox 和全库 backlog 均为 0。恢复后立即运行严格 Kafka 测试 **失败一次**（`delivery_attempts=1`）；Broker 日志显示两组约 30 秒重平衡后稳定，重跑 0.50 秒通过。真 Redis 停机时严格跨 Kafka/ACK 测试通过（2.56 秒），已恢复 healthy。
+- 没有测试 750/1000 msg/s：本轮目标是定位并消除 500/s 的显著瓶颈。30 秒稳定不等于长期运行稳定或最大容量。Kafka 单节点、无跨主机网络；在线客户端重复事件去重仍由客户端承担。Prometheus 默认只抓 app1。其他边界见 [FINAL_VALIDATION.md](FINAL_VALIDATION.md)。

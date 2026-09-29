@@ -4,7 +4,7 @@
 
 核心能力：Reliable Messaging、Idempotency、ACK、Offline Delivery、Multi-instance Kafka Delivery、Transactional Outbox、Backpressure、Rate Limiting、Metrics、Load Testing、Failure Recovery。Redis 记录可过期的在线实例提示，当前投递路径由每实例 Kafka 消费组广播后交给本地 Hub，并未使用 Redis 定向选路。
 
-本项目按阶段构建可解释、可验证的即时通信系统。注册、登录、JWT、单聊、群聊、消息持久化、幂等、ACK 与离线补发已在真实 Go 服务和 PostgreSQL 上测试。Docker Compose 的两台 IM、Redis、Kafka、Prometheus、Grafana 已实际启动；跨 Kafka 消息与 ACK、Redis/Kafka 故障恢复、10000 低消息率连接均有真实测试记录。完整栈在 100–500 条/秒目标负载下出现秒级尾延迟和 Outbox 积压，因此 **V1.0 暂不封版**，也不宣称稳态最大吞吐。`go test -race -count=1 ./...` 已在 Windows + MSYS2 GCC 和完整 Compose 环境通过，真实 Kafka 双实例测试另以 `-race -v` 确认执行通过。原始压测见 [BENCHMARK.md](BENCHMARK.md)，逐项证据与剩余条件见 [FINAL_VALIDATION.md](FINAL_VALIDATION.md)。[架构设计](ARCHITECTURE.md)、[学习记录](LEARNING.md)、[故障测试](FAILURE_TEST.md)与 [50 道面试题](INTERVIEW.md)记录实现依据和边界。
+本项目按阶段构建可解释、可验证的即时通信系统。注册、登录、JWT、单聊、群聊、消息持久化、幂等、ACK 与离线补发已在真实 Go 服务和 PostgreSQL 上测试。Docker Compose 的两台 IM、Redis、Kafka、Prometheus、Grafana 已实际启动；跨 Kafka 消息与 ACK、Redis/Kafka 故障恢复、10000 低消息率连接均有真实测试记录。最初完整栈 500 msg/s 目标负载出现秒级尾延迟与 Outbox 积压；经容器内 pprof、SQL 与逐秒 Kafka/数据库指标定位后，批量 Outbox 发布在相同 10 秒负载下两次约 497.8/s 首次送达、P95 56/58 ms，另以同速率 30 秒检查约 498.2/s、P95 58 ms，Outbox 无持续增长。**V1.0 可以在本机已测范围封版**，不宣称生产能力或最大稳态吞吐。`go test -race -count=1 ./...` 与真实 Kafka 双实例定向 race 测试通过。原始压测见 [BENCHMARK.md](BENCHMARK.md)，完整调查与失败记录见 [PERFORMANCE_INVESTIGATION.md](PERFORMANCE_INVESTIGATION.md)，最终边界见 [FINAL_VALIDATION.md](FINAL_VALIDATION.md)。[架构设计](ARCHITECTURE.md)、[学习记录](LEARNING.md)、[故障测试](FAILURE_TEST.md)与 [50 道面试题](INTERVIEW.md)记录实现依据和边界。
 
 ## 技术栈与架构
 

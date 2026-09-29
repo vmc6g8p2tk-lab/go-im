@@ -25,7 +25,7 @@ WebSocket 客户端 ── 认证/单聊 ──────┘    │
 Prometheus ← 指标端点；Grafana ← Prometheus
 ```
 
-幂等键、ACK、数据库重试、Kafka outbox、百人群聊、限流与指标端点已进入代码。真实 Docker Compose、Kafka 双实例消息与 ACK、Prometheus/Grafana API 已在本机运行验证；完整栈性能测试发现秒级尾延迟与 Outbox 积压，见 [FINAL_VALIDATION.md](FINAL_VALIDATION.md)。当前没有独立的负载均衡器，测试客户端分别连接 8080/8081。
+幂等键、ACK、数据库重试、Kafka outbox、百人群聊、限流与指标端点已进入代码。真实 Docker Compose、Kafka 双实例消息与 ACK、Prometheus/Grafana API 已在本机运行验证；完整栈最初发现秒级尾延迟与 Outbox 积压，随后定位单条同步发布并改为小批次，经同条件复测确认已测 500 msg/s 窗口内没有持续积压，见 [PERFORMANCE_INVESTIGATION.md](PERFORMANCE_INVESTIGATION.md)。当前没有独立的负载均衡器，测试客户端分别连接 8080/8081。
 
 ## 4. 组件职责与目录
 
@@ -135,7 +135,7 @@ Redis Presence 和 Kafka 发布/消费已在 Compose 实测；Prometheus 抓取 
 
 ### Kafka 异步投递与事务 outbox（真实 Broker 已验证稳定路径）
 
-新消息插入时，PostgreSQL 触发器在同一事务写入 `message_outbox(message_id, recipient_id, created_at, published_at)`；回滚时两行一起回滚。每个实例的发布循环通过 `FOR UPDATE SKIP LOCKED` 领取未发布事件，Kafka 同步写入确认后才设置 `published_at` 并提交。失败则回滚，事件留待重试。进程若在 Kafka 确认后、数据库提交前崩溃，事件可能重复发布。Kafka 不提供整个 PostgreSQL + WebSocket 业务的 exactly once。
+新消息插入时，PostgreSQL 触发器在同一事务写入 `message_outbox(message_id, recipient_id, created_at, published_at)`；回滚时两行一起回滚。每个实例的发布循环通过 `FOR UPDATE SKIP LOCKED` 最多领取 32 条未发布事件，一次同步 `WriteMessages` 等待 Kafka `RequireAll` 确认，再以一次 SQL 标记该批 `published_at` 并提交。状态 Outbox 使用同样批量边界；群聊 Outbox 保持原有单条路径。失败则回滚整批，事件留待重试。进程若在 Kafka 确认后、数据库提交前崩溃，整个批次可能重复发布。Kafka 不提供整个 PostgreSQL + WebSocket 业务的 exactly once。
 
 Topic `im.message.created.v1` 使用接收者 ID 作为 Partition Key。同一分区内部保留 Kafka 写入顺序；多发布者并发领取、数据库提交时序、客户端重连补发都会使端到端严格会话顺序不能保证。客户端按服务端消息 ID 排序展示和去重。每个实例有独立 Consumer Group `im-delivery-{instance_id}`，收到事件后再次从 PostgreSQL 读取消息，仅投递本地连接，处理成功后提交 offset。这样每个实例都能看到事件，但 Kafka 读取和数据库查询成本随实例数线性增长；大规模方案应考虑按路由转发或专用网关，且需要失效路由的恢复路径。
 
