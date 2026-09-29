@@ -124,3 +124,13 @@ ok  github.com/example/go-im/tests  1.097s
 在现有真实 PostgreSQL 18.3 实例上执行迁移 `024`–`027`。`TestDeliveryAcknowledgmentAndDuplicateACK` 验证首次 ACK 产生一条 `delivery_status_outbox` 行、重复 ACK 不增加行数；`TestDeliveryStatusOutboxPublishAndRetry` 模拟 Kafka 发布失败后确认 outbox 仍待处理，成功后确认标记已发布；`TestCrossInstanceConsumerDelivery` 以两个独立 Hub 和真实数据库、模拟消费边界验证 ACK 实例与发送者实例不同仍收到 `message.status`。`TestValidEventTargets` 验证三种事件类型及混合目标拒绝。完整 `go test -count=1 ./...` 与 `go vet ./...` 均通过。这里的发布与消费是注入函数和模拟边界，**真实 Kafka Broker 未验证**。
 
 尝试 `go test -race ./internal/websocket ./internal/messaging`：默认因 CGO 关闭失败；显式设置 `CGO_ENABLED=1` 后因本机缺少 `gcc` C 编译器失败。没有得到 race detector 的通过结论；安装兼容 Go 的 C 编译器并确认 PATH 后需重跑 `go test -race ./...`。
+
+## V1.0 迭代：压测、Profiling 与故障恢复（2026-09-29）
+
+独立 `cmd/loadtest` 经过 10 连接冒烟测试，并以真实 HTTP 用户和 WebSocket 连接运行 100、500、1000、2000、5000 连接组。各组建立的连接数均达到请求数，发送与首次送达数一致，0 个工具计数失败与意外断连；完整参数、P50/P95/P99、服务端 CPU/RSS/goroutine 和原始 JSON 见 [BENCHMARK.md](BENCHMARK.md) 与 `benchmarks/results/`。这些结果是本机回环、未启用 Kafka/Redis 的固定速率测试，不是最大吞吐。另运行 100 连接、70 秒长连接测试，349/349 首次送达，0 意外断连；关闭连接后 `/metrics` 为连接 0、队列 0、goroutine 11。
+
+在 500 连接、300 条/秒负载期间实际采集 10 秒 CPU Profile、Heap 与 Goroutine Profile；CPU 样本主要落在 Windows `WSASend`。尝试共享写缓冲池与 1 KiB 读写缓冲后，5000 连接同负载单次比较峰值 RSS 从 246.6 MiB 变为 234.3 MiB，P95/P99 从 0.731/1.108 ms 变为 1.043/2.674 ms；因此只记录内存与延迟取舍，不声称总体提速或显著性结论。
+
+新增 `TestDatabaseConnectionOutageAndRecovery`：以 TCP 代理断开真实服务与 PostgreSQL 的网络连接，实际观察 `internal_error`、库中 0 行；恢复连接并复用 UUID 后，接收者收到消息、库中 1 行。目标测试通过。真实 PostgreSQL 进程宕机和主从恢复未验证。`TestRealKafkaCrossInstanceDeliveryAndStatus` 已编写，但当前无 Docker/真实 Broker，缺少 `INTEGRATION_SECOND_BASE_URL` 时明确跳过；**不能记为真实 Kafka 通过**。
+
+在最终 1 KiB 缓冲版本和真实 PostgreSQL 上重跑 `go test -count=1 ./...`，包含原有与新故障测试，全部通过；接下来仍需在 Docker 环境执行真实 Kafka/Redis/Compose、安装 `gcc` 后执行 race detector。

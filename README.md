@@ -1,6 +1,24 @@
 # Go 即时通信系统 · V1.0 迭代中
 
-本项目按阶段构建可解释、可验证的即时通信系统。已实现注册、登录、JWT、WebSocket 单聊、PostgreSQL 落库、历史查询、客户端消息 ID 幂等、送达 ACK、未确认消息重试、离线补发与基础百人群聊。Redis 在线实例路由、Kafka outbox 跨实例事件代码和 Prometheus 指标端点已接入；真实 Kafka Broker 和监控容器环境尚未验证。双进程数据库补发路径已实测。**尚无并发性能结论。** [架构设计](ARCHITECTURE.md)解释目标与后续边界，[学习记录](LEARNING.md)解释关键实现及面试问答。
+本项目按阶段构建可解释、可验证的即时通信系统。已实现注册、登录、JWT、WebSocket 单聊、PostgreSQL 落库、历史查询、客户端消息 ID 幂等、送达 ACK、未确认消息重试、离线补发与基础百人群聊。Redis 在线实例路由、Kafka outbox 跨实例事件代码和 Prometheus 指标端点已接入；真实 Kafka Broker 和监控容器环境尚未验证。双进程数据库补发路径已实测。**本机回环地址的负载测试已经执行，结果见 [BENCHMARK.md](BENCHMARK.md)，不是线上容量承诺。** [架构设计](ARCHITECTURE.md)、[学习记录](LEARNING.md)、[故障测试](FAILURE_TEST.md)与 [50 道面试题](INTERVIEW.md)记录实现依据和边界。
+
+## 技术栈与架构
+
+Go、HTTP REST、WebSocket、PostgreSQL、Redis、Kafka、Docker Compose、Prometheus、Grafana。数据库保存消息与 outbox 作为可靠状态；Redis 只保存可过期路由；Kafka 用于配置后的跨实例事件通知。下图是已编写代码与 Compose 对应的架构，**真实 Kafka/Redis 容器链路仍待验证**。
+
+```mermaid
+flowchart LR
+    Client[客户端] -->|HTTP + WebSocket| A[IM 实例 1]
+    Client -->|HTTP + WebSocket| B[IM 实例 2]
+    A <--> PG[(PostgreSQL 消息与 outbox)]
+    B <--> PG
+    A <--> R[(Redis 在线路由)]
+    B <--> R
+    A <--> K[(Kafka 事件 Topic)]
+    B <--> K
+    P[Prometheus] -->|抓取 /metrics| A
+    P --> G[Grafana 面板]
+```
 
 ## 环境与启动
 
@@ -37,7 +55,9 @@ WebSocket 地址是 `ws://localhost:8080/v1/ws`。升级后首帧发送 `{"type"
 
 ## 监控
 
-Go 服务在 `GET /metrics` 暴露 Prometheus 指标；本地 Compose 配置 Prometheus `http://localhost:9090` 和 Grafana `http://localhost:3000`。Grafana 管理员密码由 `.env` 中的 `GRAFANA_ADMIN_PASSWORD` 提供，面板配置在 [im-overview.json](deployments/grafana/dashboards/im-overview.json)。当前抓取配置监控默认 `app` 实例；启用 `multi` profile 时，应在 [prometheus.yml](deployments/prometheus.yml) 增加 `app2:8080` 目标。Grafana 截图应在真实容器启动并产生测试流量后保存至 `docs/screenshots/`；仓库现在没有截图或性能数字。`/metrics` 应只在受信网络开放。
+Go 服务在 `GET /metrics` 暴露 Prometheus 指标；本地 Compose 配置 Prometheus `http://localhost:9090` 和 Grafana `http://localhost:3000`。Grafana 管理员密码由 `.env` 中的 `GRAFANA_ADMIN_PASSWORD` 提供，面板配置在 [im-overview.json](deployments/grafana/dashboards/im-overview.json)。当前抓取配置监控默认 `app` 实例；启用 `multi` profile 时，应在 [prometheus.yml](deployments/prometheus.yml) 增加 `app2:8080` 目标。Grafana 截图应在真实容器启动并产生测试流量后保存至 `docs/screenshots/`；仓库现在没有监控截图或预填面板数据。`/metrics` 应只在受信网络开放。
+
+`PPROF_ADDR=127.0.0.1:6060` 可选开启独立回环端口的 CPU、Heap、Goroutine Profile。不要将此端口转发到公网；实际采样与热点见 [BENCHMARK.md](BENCHMARK.md)。
 
 ## 测试与数据库核查
 
@@ -51,10 +71,22 @@ docker compose --env-file .env -f deployments/compose.yaml exec postgres psql -U
 
 `tests/e2e_test.go` 使用真实 HTTP、两个 WebSocket 连接和 PostgreSQL，验证双向消息、落库及历史查询。`INTEGRATION_SERVER_BINARY` 与 `INTEGRATION_JWT_SECRET` 还可启用双进程故障恢复测试。未设置所需环境变量时测试会明确跳过，不可将跳过写成通过。实际执行记录见 [TEST_RESULTS.md](TEST_RESULTS.md)。
 
+真实 Kafka 双实例链路可在 Compose 启动后设置 `INTEGRATION_SECOND_BASE_URL=http://localhost:8081`，并提供两个服务共用的 `DATABASE_URL` 与 `INTEGRATION_BASE_URL`，执行 `go test -run TestRealKafkaCrossInstanceDeliveryAndStatus -v ./tests`。本机无 Docker，当前该测试只完成编写并在缺少环境变量时跳过。
+
+独立压测工具：
+
+```powershell
+go build -o loadtest.exe ./cmd/loadtest
+./loadtest.exe -base http://127.0.0.1:8080 -connections 100 -users 10 -rate 50 -duration 15s -output result.json
+```
+
+详细负载模型、原始结果、pprof 和优化前后实测见 [BENCHMARK.md](BENCHMARK.md)。压测会创建用户与数据库消息，请使用测试数据库。
+
 ## 目录
 
 ```text
 cmd/server             入口、依赖装配、退出
+cmd/loadtest           独立 WebSocket 压测工具
 internal/auth          密码散列、JWT
 internal/config        环境配置
 internal/handler       HTTP 接口
@@ -70,6 +102,7 @@ internal/service       业务规则
 internal/websocket     Hub、连接读写循环
 migrations             已版本化的 SQL
 deployments            Dockerfile、Compose
+benchmarks/results     本机真实测试的原始 JSON 汇总
 scripts                开发密钥初始化
 tests                  真实服务端到端测试
 ```
@@ -83,4 +116,4 @@ tests                  真实服务端到端测试
 - `go.mod` 暂用 `github.com/example/go-im`，发布到你的 GitHub 仓库前应替换为实际仓库路径并更新 Go import。
 - 历史查询分页按数据库消息 ID，而非全局严格时间顺序。
 
-Kafka/outbox 代码可用 `KAFKA_BROKERS` 启用；未设置时沿用单实例即时投递。`docker compose --profile multi --env-file .env -f deployments/compose.yaml up --build -d` 配置第二个服务实例（8081）；本机没有 Docker，Compose 及真实 Broker **未验证**。每实例独立消费组使 Kafka 读取成本随实例数增加。群离线消息目前通过历史 API 查询，尚无逐成员 ACK。正式压测仍未执行。真实 Redis 与 Compose 启动尚未在本机验证。
+Kafka/outbox 代码可用 `KAFKA_BROKERS` 启用；未设置时沿用单实例即时投递。`docker compose --profile multi --env-file .env -f deployments/compose.yaml up --build -d` 配置第二个服务实例（8081）；本机没有 Docker，Compose 及真实 Broker **未验证**。每实例独立消费组使 Kafka 读取成本随实例数增加。群离线消息目前通过历史 API 查询，尚无逐成员 ACK。正式本机回环压测已执行，但真实 Redis、Kafka 和 Compose 启动尚未在本机验证。

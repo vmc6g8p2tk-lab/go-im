@@ -25,7 +25,7 @@ WebSocket 客户端 ── 认证/单聊 ──────┘    │
 Prometheus ← 指标端点；Grafana ← Prometheus
 ```
 
-幂等键、ACK、数据库重试、Kafka outbox、百人群聊、限流与指标端点已进入代码。正式压测仍未完成。真实 Kafka/Prometheus/Grafana 容器还未运行，不能仅凭代码和模拟测试宣称跨实例 Broker 或监控面板链路已验证。
+幂等键、ACK、数据库重试、Kafka outbox、百人群聊、限流与指标端点已进入代码。本机回环负载和 pprof 测试见 [BENCHMARK.md](BENCHMARK.md)；真实 Kafka/Prometheus/Grafana 容器还未运行，不能仅凭代码和模拟测试宣称跨实例 Broker 或监控面板链路已验证。
 
 ## 4. 组件职责与目录
 
@@ -176,6 +176,7 @@ WebSocket `group.send` 入库后返回 `server_ack`；Kafka 未配置时只向�
 - 使用 SQL 迁移文件和独立迁移命令。数据库约束与服务层校验同时存在。
 - bcrypt 是方便验证的安全起点，但计算成本会影响登录吞吐；未来根据压测及安全要求评估 Argon2id。
 - Hub 只管理本实例连接；Kafka 每实例独立消费组负责跨实例事件传播，数据库补发为恢复路径。双进程数据库补发已验证，真实 Kafka 跨实例链路尚未验证。
+- 可选 `PPROF_ADDR` 仅允许回环地址，在与业务端口分开的 HTTP 服务上暴露 CPU、Heap、Goroutine Profile；负载工具另在 `cmd/loadtest`。WebSocket 升级使用共享写缓冲池与 1 KiB 读写缓冲，8 KiB 帧限制仍单独生效；较大帧可能增加读取次数。
 - Redis 在线路由可通过 `REDIS_ADDR` 启用；Compose 现包含 Redis，但尚未在本机实际验证容器启动。
 - 注册与登录在进程内按直接连接 IP 令牌桶限流（每秒补 2 个、突发 100 个）；WebSocket 文本发送按连接及用户分别每秒补 100 个、突发 200 个。`X-Forwarded-For` 未经可信代理验证时不参与身份判定。此限制只在单进程生效，多实例累计配额会放大，需在网关或 Redis 实现全局限流。JSON 请求/帧与 WebSocket 帧大小均受限；身份始终取 JWT，不信任客户端提供的 `sender_id`。
 
