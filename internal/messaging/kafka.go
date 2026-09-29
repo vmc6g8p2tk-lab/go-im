@@ -47,19 +47,31 @@ func (k *Kafka) Close() {
 }
 
 func (k *Kafka) Publish(ctx context.Context, event repository.OutboxEvent) error {
-	value, err := json.Marshal(event)
-	if err != nil {
-		return err
+	return k.PublishBatch(ctx, []repository.OutboxEvent{event})
+}
+
+// PublishBatch makes one synchronous broker call for a claimed Outbox batch.
+// RequireAll remains enabled; an error leaves every claimed row pending.
+func (k *Kafka) PublishBatch(ctx context.Context, events []repository.OutboxEvent) error {
+	if len(events) == 0 {
+		return nil
 	}
-	// Recipient ID preserves per-recipient partition order. PostgreSQL IDs and
-	// the ACK protocol remain authoritative across retries and replay.
-	key := "u:" + strconv.FormatInt(event.RecipientID, 10)
-	if event.GroupID > 0 {
-		key = "g:" + strconv.FormatInt(event.GroupID, 10)
-	} else if event.SenderID > 0 {
-		key = "u:" + strconv.FormatInt(event.SenderID, 10)
+	messages := make([]kafka.Message, 0, len(events))
+	for _, event := range events {
+		value, err := json.Marshal(event)
+		if err != nil {
+			return err
+		}
+		// The same key as single-event publishing preserves partition ordering.
+		key := "u:" + strconv.FormatInt(event.RecipientID, 10)
+		if event.GroupID > 0 {
+			key = "g:" + strconv.FormatInt(event.GroupID, 10)
+		} else if event.SenderID > 0 {
+			key = "u:" + strconv.FormatInt(event.SenderID, 10)
+		}
+		messages = append(messages, kafka.Message{Key: []byte(key), Value: value})
 	}
-	err = k.writer.WriteMessages(ctx, kafka.Message{Key: []byte(key), Value: value})
+	err := k.writer.WriteMessages(ctx, messages...)
 	if k.Metrics != nil {
 		result := "ok"
 		value := float64(1)
@@ -68,10 +80,12 @@ func (k *Kafka) Publish(ctx context.Context, event repository.OutboxEvent) error
 			value = 0
 		}
 		k.Metrics.KafkaProducerUp.Set(value)
-		k.Metrics.KafkaPublished.WithLabelValues(result).Inc()
+		k.Metrics.KafkaPublished.WithLabelValues(result).Add(float64(len(events)))
 	}
 	return err
 }
+
+const outboxBatchSize = 32
 
 func (k *Kafka) RunConsumer(ctx context.Context, handle func(context.Context, repository.OutboxEvent) error) {
 	for ctx.Err() == nil {
@@ -137,10 +151,10 @@ func validEvent(event repository.OutboxEvent) bool {
 	return targets == 1 && (event.SenderID == 0 && event.Status == "" || event.SenderID > 0 && event.Status == "delivered")
 }
 
-func RunPublisher(ctx context.Context, store *repository.Store, publish func(context.Context, repository.OutboxEvent) error) {
+func RunPublisher(ctx context.Context, store *repository.Store, publish func(context.Context, []repository.OutboxEvent) error) {
 	for ctx.Err() == nil {
 		operationCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-		found, err := store.PublishNext(operationCtx, publish)
+		found, err := store.PublishNextBatch(operationCtx, outboxBatchSize, publish)
 		cancel()
 		if err != nil {
 			slog.Warn("Kafka outbox publish failed", "error", err)
@@ -165,10 +179,10 @@ func RunGroupPublisher(ctx context.Context, store *repository.Store, publish fun
 	}
 }
 
-func RunStatusPublisher(ctx context.Context, store *repository.Store, publish func(context.Context, repository.OutboxEvent) error) {
+func RunStatusPublisher(ctx context.Context, store *repository.Store, publish func(context.Context, []repository.OutboxEvent) error) {
 	for ctx.Err() == nil {
 		operationCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-		found, err := store.PublishNextStatus(operationCtx, publish)
+		found, err := store.PublishNextStatusBatch(operationCtx, outboxBatchSize, publish)
 		cancel()
 		if err != nil {
 			slog.Warn("Kafka status outbox publish failed", "error", err)

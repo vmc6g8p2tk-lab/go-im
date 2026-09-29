@@ -105,12 +105,12 @@ func run() error {
 	statusPublisherDone := make(chan struct{})
 	kafkaConsumerDone := make(chan struct{})
 	if broker != nil {
-		go func() { defer close(kafkaPublisherDone); messaging.RunPublisher(retryCtx, store, broker.Publish) }()
+		go func() { defer close(kafkaPublisherDone); messaging.RunPublisher(retryCtx, store, broker.PublishBatch) }()
 		go func() { defer close(kafkaConsumerDone); broker.RunConsumer(retryCtx, wsServer.HandleOutboxEvent) }()
 		go func() { defer close(groupPublisherDone); messaging.RunGroupPublisher(retryCtx, store, broker.Publish) }()
 		go func() {
 			defer close(statusPublisherDone)
-			messaging.RunStatusPublisher(retryCtx, store, broker.Publish)
+			messaging.RunStatusPublisher(retryCtx, store, broker.PublishBatch)
 		}()
 	} else {
 		close(kafkaPublisherDone)

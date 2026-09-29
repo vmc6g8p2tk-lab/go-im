@@ -28,30 +28,60 @@ type OutboxEvent struct {
 	Status      string `json:"status,omitempty"`
 }
 
-// PublishNext keeps the row locked until Kafka confirms the write. A crash
-// after Kafka accepts it but before commit may publish it twice; consumers
-// must therefore be idempotent by message ID.
+// PublishNext preserves the single-event entry point used by existing callers.
 func (s *Store) PublishNext(ctx context.Context, publish func(context.Context, OutboxEvent) error) (bool, error) {
+	return s.PublishNextBatch(ctx, 1, func(ctx context.Context, events []OutboxEvent) error {
+		return publish(ctx, events[0])
+	})
+}
+
+// PublishNextBatch keeps claimed rows locked until Kafka confirms the batch.
+// A crash between Kafka acceptance and commit may republish the whole batch;
+// consumers must remain idempotent by message ID.
+func (s *Store) PublishNextBatch(ctx context.Context, limit int, publish func(context.Context, []OutboxEvent) error) (bool, error) {
+	if limit < 1 {
+		return false, fmt.Errorf("outbox batch limit must be positive")
+	}
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
-	var event OutboxEvent
-	err = tx.QueryRow(ctx, `SELECT message_id, recipient_id FROM message_outbox
+	rows, err := tx.Query(ctx, `SELECT message_id, recipient_id FROM message_outbox
 		WHERE published_at IS NULL ORDER BY created_at, message_id
-		LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&event.MessageID, &event.RecipientID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
+		LIMIT $1 FOR UPDATE SKIP LOCKED`, limit)
 	if err != nil {
 		return false, err
 	}
-	if err := publish(ctx, event); err != nil {
+	events := make([]OutboxEvent, 0, limit)
+	ids := make([]int64, 0, limit)
+	for rows.Next() {
+		var event OutboxEvent
+		if err := rows.Scan(&event.MessageID, &event.RecipientID); err != nil {
+			rows.Close()
+			return false, err
+		}
+		events = append(events, event)
+		ids = append(ids, event.MessageID)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE message_outbox SET published_at = now() WHERE message_id = $1`, event.MessageID); err != nil {
+	if len(events) == 0 {
+		return false, nil
+	}
+	if err := publish(ctx, events); err != nil {
 		return false, err
+	}
+	command, err := tx.Exec(ctx, `UPDATE message_outbox SET published_at = now()
+		WHERE message_id = ANY($1::bigint[]) AND published_at IS NULL`, ids)
+	if err != nil {
+		return false, err
+	}
+	if command.RowsAffected() != int64(len(ids)) {
+		return false, fmt.Errorf("message outbox marked %d of %d published", command.RowsAffected(), len(ids))
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, err
